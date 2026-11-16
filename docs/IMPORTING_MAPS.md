@@ -1,0 +1,84 @@
+# Importing map layers from another decomp project
+
+This guide describes the generic workflow for taking an exported map from one
+decomp project and importing it into the matching map of another project.
+
+## Placeholders
+
+- `<poryeasy>`: path to this repository
+- `<source-project>`: project that provides the edited layers
+- `<target-project>`: project that receives the layers
+- `<map>`: map name or symbol, for example a map folder name
+- `<input-dir>`: directory that combines the source PNGs with the target JSONs
+
+## 1. Export the source project
+
+Run from `<source-project>`:
+
+```sh
+python <poryeasy>/porytiles_map.py export <map>
+```
+
+Export replaces existing layer images by default. Use `--no-overwrite` to
+refuse.
+
+## 2. Export the target project
+
+Run from `<target-project>`:
+
+```sh
+python <poryeasy>/porytiles_map.py export <map>
+```
+
+This creates the target `map.json`, `palettes.json`, `palettes.png` and the
+animation manifest that the import needs.
+
+## 3. Build the input directory
+
+Create `<input-dir>` and combine:
+
+- the source `bottom.png`, `middle.png`, `top.png`;
+- the source `animated_metatiles.png`, if the map has animations;
+- the target `map.json`, `palettes.json`, `palettes.png`;
+- an animation manifest compatible with the target project.
+
+If the source and target animation sheets have different row layouts, translate
+the manifest before importing. Copying animation PNGs against an unrelated
+manifest will map rows to the wrong metatiles, doors or palettes.
+
+## 4. Import into the target project
+
+Run from `<target-project>`:
+
+```sh
+python <poryeasy>/porytiles_map.py import <map> --input <input-dir>
+```
+
+Current defaults:
+
+- `--on-new replace`
+- `--on-remove keep`
+- `--on-extra-animation-row skip`
+- `--palette-mode smart`
+
+Use `--dry-run` to validate without writing files.
+
+## 5. Re-export and review
+
+```sh
+python <poryeasy>/porytiles_map.py export <map>
+```
+
+The export directory contains `preview.png` for visual review. Also open the
+map and tilesets in Porymap after importing.
+
+## Notes
+
+- Replace mode only frees a metatile when it has zero references in the edited
+  map. Doors and critical animated metatiles are protected.
+- `smart` palette mode counts real tileset pixels, keeps at least one colour
+  per hue family, and distributes the remaining slots by usage.
+- Old tile indices are remapped to the closest colours in the new palettes.
+- Metatiles that share an overwritten tile receive that tile's replacement
+  palette bank, including metatiles outside the imported map.
+- Always keep a backup or use version control before a large overhaul.
