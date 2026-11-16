@@ -70,7 +70,7 @@ From the decomp project root:
 python <poryeasy>/porytiles_map.py export LittlerootTown
 
 #    Output (by default):
-#    porytiles/maps/LittlerootTown/
+#    poryeasy/maps/LittlerootTown/
 #      bottom.png
 #      middle.png
 #      top.png

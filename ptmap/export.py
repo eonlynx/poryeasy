@@ -38,7 +38,7 @@ class ExportPaths:
 
 
 def default_export_directory(project: Project, target: Target) -> Path:
-    return project.root / "porytiles" / "maps" / target.display_name
+    return project.root / "poryeasy" / "maps" / target.display_name
 
 
 def export_map(
@@ -96,7 +96,7 @@ def export_map(
     palette_manifest = export_palette_sheet(project, tilesets, directory)
 
     metadata = {
-        "format": "porytiles-map-export",
+        "format": "poryeasy-map-export",
         "version": 1,
         "map": {
             "id": target.map.id if target.map else None,

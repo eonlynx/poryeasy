@@ -8,7 +8,7 @@
 Examples (run from a pokeemerald / pokeemerald-expansion project root):
 
     uv run <porytiles>/porytiles/tools/map_editor/porytiles_map.py export LittlerootTown
-    # edit porytiles/maps/LittlerootTown/{bottom,middle,top}.png in GIMP
+    # edit poryeasy/maps/LittlerootTown/{bottom,middle,top}.png in GIMP
     uv run .../porytiles_map.py import LittlerootTown
 
 If Pillow is installed globally, plain ``python porytiles_map.py`` works too.
