@@ -843,6 +843,8 @@ class SyntheticTripleLayerTests(unittest.TestCase):
                 "skip",
                 "--on-remove",
                 "keep",
+                "--on-extra-animation-row",
+                "ask",
                 input_text="m\n1\n1\nMB_TALL_GRASS\n",
                 project=project,
             )
@@ -1400,6 +1402,8 @@ class ExpansionTests(unittest.TestCase):
             "LittlerootTown",
             "--input",
             str(self.export_dir),
+            "--on-new",
+            "ask",
             input_text="3\nn\n",
             project=self.project,
         )
@@ -1729,6 +1733,8 @@ class SyntheticDoorTests(unittest.TestCase):
                 "skip",
                 "--on-remove",
                 "keep",
+                "--on-extra-animation-row",
+                "ask",
                 input_text="m\nn\nTorch\n1\n2\n16\nMB_LONG_GRASS\n",
                 project=project,
             )
@@ -1831,6 +1837,8 @@ class SyntheticDoorTests(unittest.TestCase):
                 "skip",
                 "--on-remove",
                 "keep",
+                "--on-extra-animation-row",
+                "ask",
                 input_text="d\n1\nTestNewDoor\n",
                 project=project,
             )
@@ -1850,6 +1858,8 @@ class SyntheticDoorTests(unittest.TestCase):
                 "skip",
                 "--on-remove",
                 "keep",
+                "--on-extra-animation-row",
+                "ask",
                 input_text="d\n1\nTestNewDoor\n",
                 project=project,
             )
