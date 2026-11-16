@@ -117,69 +117,80 @@ def _build_variant_tileset(
     layout=None,
     *,
     persist: bool = True,
+    force: bool = False,
 ) -> Tileset:
     max_tiles = base.max_local_tiles
-    if len(base.patterns) <= max_tiles:
+    overflow = len(base.patterns) > max_tiles
+    if not overflow and not force:
         raise MapEditorError(f"{base.name} does not exceed its tile limit.")
-    if layout is not None:
-        try:
-            blocks = list(blocks) + list(project.read_border(layout))
-        except MapEditorError:
-            pass
-    map_used = _map_used_tiles(pair, base, blocks)
-    usage = _collect_usage(pair, base, layout.id if layout is not None else None)
-    new_used = {
-        local
-        for local in range(original_count, len(base.patterns))
-        if usage.get(local, 0) > 0
-    }
-    must_keep = map_used | new_used
-    if len(must_keep) > max_tiles:
-        raise MapEditorError(
-            f"{base.name} needs {len(must_keep)} tiles for this map, but the limit is "
-            f"{max_tiles}. Reduce the new tile count or split the map further."
-        )
-    remaining = [local for local in range(original_count) if local not in must_keep]
-    remaining.sort(key=lambda local: (-usage.get(local, 0), local))
-    keep = set(must_keep)
-    keep.update(remaining[: max_tiles - len(keep)])
-    kept_originals = sorted(local for local in keep if local < original_count)
-    free_slots = [
-        local for local in range(max_tiles) if local not in set(kept_originals)
-    ]
-    old_to_new: dict[int, int] = {local: local for local in kept_originals}
-    for local in sorted(local for local in keep if local >= original_count):
-        if not free_slots:
-            raise MapEditorError(
-                f"{base.name} has no room for new tile {local} in the per-map variant."
-            )
-        old_to_new[local] = free_slots.pop(0)
-    kept_original_patterns = [(local, base.patterns[local]) for local in kept_originals]
-    for old in range(len(base.patterns)):
-        if old in old_to_new:
-            continue
-        nearest = _nearest_kept(base.patterns[old], kept_original_patterns)
-        if nearest is None:
-            continue
-        old_to_new[old] = nearest
 
-    metatiles: list[list[TileRef]] = []
-    for metatile in base.metatiles:
-        remapped: list[TileRef] = []
-        for entry in metatile:
-            local = _tile_owner_local(entry, base, len(base.patterns))
-            if local is None or local not in old_to_new:
-                remapped.append(entry)
-                continue
-            remapped.append(
-                TileRef(
-                    base.global_tile_base + old_to_new[local],
-                    entry.palette,
-                    entry.hflip,
-                    entry.vflip,
-                )
+    if overflow:
+        if layout is not None:
+            try:
+                blocks = list(blocks) + list(project.read_border(layout))
+            except MapEditorError:
+                pass
+        map_used = _map_used_tiles(pair, base, blocks)
+        usage = _collect_usage(pair, base, layout.id if layout is not None else None)
+        new_used = {
+            local
+            for local in range(original_count, len(base.patterns))
+            if usage.get(local, 0) > 0
+        }
+        must_keep = map_used | new_used
+        if len(must_keep) > max_tiles:
+            raise MapEditorError(
+                f"{base.name} needs {len(must_keep)} tiles for this map, but the limit is "
+                f"{max_tiles}. Reduce the new tile count or split the map further."
             )
-        metatiles.append(remapped)
+        remaining = [local for local in range(original_count) if local not in must_keep]
+        remaining.sort(key=lambda local: (-usage.get(local, 0), local))
+        keep = set(must_keep)
+        keep.update(remaining[: max_tiles - len(keep)])
+        kept_originals = sorted(local for local in keep if local < original_count)
+        free_slots = [
+            local for local in range(max_tiles) if local not in set(kept_originals)
+        ]
+        old_to_new: dict[int, int] = {local: local for local in kept_originals}
+        for local in sorted(local for local in keep if local >= original_count):
+            if not free_slots:
+                raise MapEditorError(
+                    f"{base.name} has no room for new tile {local} in the per-map variant."
+                )
+            old_to_new[local] = free_slots.pop(0)
+        kept_original_patterns = [
+            (local, base.patterns[local]) for local in kept_originals
+        ]
+        for old in range(len(base.patterns)):
+            if old in old_to_new:
+                continue
+            nearest = _nearest_kept(base.patterns[old], kept_original_patterns)
+            if nearest is None:
+                continue
+            old_to_new[old] = nearest
+
+        metatiles: list[list[TileRef]] = []
+        for metatile in base.metatiles:
+            remapped: list[TileRef] = []
+            for entry in metatile:
+                local = _tile_owner_local(entry, base, len(base.patterns))
+                if local is None or local not in old_to_new:
+                    remapped.append(entry)
+                    continue
+                remapped.append(
+                    TileRef(
+                        base.global_tile_base + old_to_new[local],
+                        entry.palette,
+                        entry.hflip,
+                        entry.vflip,
+                    )
+                )
+            metatiles.append(remapped)
+    else:
+        # Forced per-map copy: keep every tile and metatile reference intact.
+        keep = set(range(len(base.patterns)))
+        old_to_new = {local: local for local in keep}
+        metatiles = [list(metatile) for metatile in base.metatiles]
 
     variant_name = f"{base.name}_{suffix}"
     root = project._tileset_root(base.kind)
@@ -225,11 +236,16 @@ def _build_variant_tileset(
     )
 
     variants = project._variant_registry(base)
-    kept_base_to_variant = {
-        old: new
-        for old, new in old_to_new.items()
-        if old < original_count and old in keep and old < base.max_local_tiles
-    }
+    if overflow:
+        kept_base_to_variant = {
+            old: new
+            for old, new in old_to_new.items()
+            if old < original_count and old in keep and old < base.max_local_tiles
+        }
+    else:
+        kept_base_to_variant = {
+            local: local for local in range(len(base.patterns))
+        }
     entry = {
         "name": variant_name,
         "folder": folder,
@@ -261,12 +277,15 @@ def preview_layout_variants(
     target: Target,
     blocks: list[int],
     original_counts: dict[str, int],
+    force_kinds: set[str] | None = None,
 ) -> dict[str, Tileset]:
     """Builds in-memory variants for validation without touching the project."""
     previews: dict[str, Tileset] = {}
     suffix = _camel(target.display_name)
+    force_kinds = force_kinds or set()
     for tileset, kind in ((pair.primary, "primary"), (pair.secondary, "secondary")):
-        if len(tileset.patterns) <= tileset.max_local_tiles:
+        forced = kind in force_kinds
+        if not forced and len(tileset.patterns) <= tileset.max_local_tiles:
             continue
         previews[kind] = _build_variant_tileset(
             project,
@@ -277,6 +296,7 @@ def preview_layout_variants(
             suffix,
             layout,
             persist=False,
+            force=forced,
         )
     return previews
 
@@ -412,14 +432,17 @@ def create_layout_variants(
     target: Target,
     blocks: list[int],
     original_counts: dict[str, int],
+    force_kinds: set[str] | None = None,
 ) -> VariantResult:
     result = VariantResult()
     suffix = _camel(target.display_name)
     new_primary = layout.primary_tileset
     new_secondary = layout.secondary_tileset
     protected_by_kind: dict[str, set[int]] = {}
+    force_kinds = force_kinds or set()
     for tileset, kind in ((pair.primary, "primary"), (pair.secondary, "secondary")):
-        if len(tileset.patterns) <= tileset.max_local_tiles:
+        forced = kind in force_kinds
+        if not forced and len(tileset.patterns) <= tileset.max_local_tiles:
             continue
         variant = _build_variant_tileset(
             project,
@@ -429,6 +452,7 @@ def create_layout_variants(
             original_counts.get(kind, len(tileset.patterns)),
             suffix,
             layout,
+            force=forced,
         )
         result.variants[kind] = variant
         result.names[kind] = variant.name
@@ -470,12 +494,19 @@ def create_layout_variants(
         if registry_path is not None:
             result.affected_paths.append(registry_path)
             result.registry_paths.append(registry_path)
-        result.warnings.append(
-            f"{tileset.name} exceeded the tile limit; created {variant.name} for "
-            f"{target.display_name}. The original tileset was truncated/remapped as "
-            "far as possible. The variant reuses the base tileset's animation "
-            "callback; verify that the animated tiles it needs were kept."
-        )
+        if forced and len(tileset.patterns) <= tileset.max_local_tiles:
+            result.warnings.append(
+                f"Created per-map tileset variant {variant.name} for "
+                f"{target.display_name} because --force-variant was requested. "
+                "The base tileset was left unchanged."
+            )
+        else:
+            result.warnings.append(
+                f"{tileset.name} exceeded the tile limit; created {variant.name} for "
+                f"{target.display_name}. The original tileset was truncated/remapped as "
+                "far as possible. The variant reuses the base tileset's animation "
+                "callback; verify that the animated tiles it needs were kept."
+            )
         if kind == "primary":
             new_primary = variant.name
         else:

@@ -466,6 +466,17 @@ variant for the affected map instead of failing:
 * the original tileset is truncated/remapped as far as possible, so shared
   changes still apply to it up to the limit.
 
+Use `--force-variant` to create a per-map variant even when the tileset is under
+the tile limit. Pass `primary`, `secondary`, or omit the value for both:
+
+```sh
+# Keep the palette and tile edits local to this map
+... import LittlerootTown --force-variant secondary --on-new add-secondary
+```
+
+This is useful when you want to adapt palettes or add tiles for one map without
+changing the base tileset used by every other map.
+
 Variant metadata is stored in
 `data/tilesets/<kind>/<base_folder>_variants.json`. It records the base
 tileset, `base_maps`, variant names/folders, affected maps/layouts, variant→base

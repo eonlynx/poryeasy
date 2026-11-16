@@ -104,6 +104,7 @@ def cmd_import(args: argparse.Namespace) -> int:
         on_extra_row=args.on_extra_animation_row,
         force_palette_edits=args.force_palette_edits,
         palette_mode=args.palette_mode,
+        force_variant=args.force_variant,
     )
     result = importer.run()
 
@@ -370,6 +371,17 @@ def build_parser() -> argparse.ArgumentParser:
         ),
         default="replace",
         help="What to do when an edited block does not match an existing metatile (default: replace)",
+    )
+    import_parser.add_argument(
+        "--force-variant",
+        nargs="?",
+        const="both",
+        choices=("primary", "secondary", "both"),
+        default=None,
+        help=(
+            "Create a per-map tileset variant even when the tileset is under the tile "
+            "limit. Choose primary, secondary or both (default when omitted: both)"
+        ),
     )
     import_parser.add_argument(
         "--anchor",

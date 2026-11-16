@@ -252,6 +252,7 @@ class ImportMap:
         on_extra_row: str = "ask",
         force_palette_edits: bool = False,
         palette_mode: str = "smart",
+        force_variant: str | None = None,
     ) -> None:
         self.project = project
         self.target = target
@@ -276,6 +277,7 @@ class ImportMap:
         self.on_extra_row = on_extra_row
         self.force_palette_edits = force_palette_edits
         self.palette_mode = palette_mode
+        self.force_variant = force_variant
         self._sheet_cell_index: dict[bytes, list[int]] = {}
         self._change_allowed_banks: dict[int, range] = {}
         self._replace_plan_units: list[ReplaceUnit] | None = None
@@ -2415,10 +2417,16 @@ class ImportMap:
         self._warn_animated_loss(groups, working)
         self._warn_animated_remap_loss(remaps, working)
 
-        needs_variants = any(
+        force_variant_kinds: set[str] = set()
+        if self.force_variant in ("primary", "both"):
+            force_variant_kinds.add("primary")
+        if self.force_variant in ("secondary", "both"):
+            force_variant_kinds.add("secondary")
+        overflow_variants = any(
             len(tileset.patterns) > tileset.max_local_tiles
             for tileset in (self.tilesets.primary, self.tilesets.secondary)
         )
+        needs_variants = overflow_variants or bool(force_variant_kinds)
         preview_variants: dict[str, object] = {}
         saved_primary = self.tilesets.primary
         saved_secondary = self.tilesets.secondary
@@ -2430,6 +2438,7 @@ class ImportMap:
                 self.target,
                 working,
                 self.original_tile_counts,
+                force_kinds=force_variant_kinds,
             )
             if "primary" in preview_variants:
                 self.tilesets.primary = preview_variants["primary"]
@@ -2540,10 +2549,16 @@ class ImportMap:
         if self.resized:
             map_dirty = True
         if self.dry_run and needs_variants:
-            self.result.warnings.append(
-                "A tileset exceeded the hardware tile limit. A real import would "
-                "create a per-map tileset variant."
-            )
+            if overflow_variants:
+                self.result.warnings.append(
+                    "A tileset exceeded the hardware tile limit. A real import would "
+                    "create a per-map tileset variant."
+                )
+            else:
+                self.result.warnings.append(
+                    "A real import would create a per-map tileset variant because "
+                    "--force-variant was requested."
+                )
         if not self.dry_run:
             touched_paths: list[Path] = []
             if map_dirty:
@@ -2594,6 +2609,7 @@ class ImportMap:
                     self.target,
                     working,
                     self.original_tile_counts,
+                    force_kinds=force_variant_kinds,
                 )
                 if variant_result.changed:
                     if "primary" in variant_result.variants:

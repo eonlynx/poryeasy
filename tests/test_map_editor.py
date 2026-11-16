@@ -2276,6 +2276,97 @@ class TilesetVariantTests(unittest.TestCase):
             synced_variant = project.load_tileset(variant.name, "secondary")
             self.assertEqual(synced_variant.patterns[variant_local], new_pattern)
 
+    def test_force_variant_without_overflow(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ptmap-force-variant-") as temp:
+            project_dir = Path(temp) / "project"
+            make_synthetic_triple_project(project_dir)
+            project = Project(project_dir)
+            target = project.resolve("TestMap")
+            assert target.layout is not None
+            pair = project.load_tileset_pair(target.layout)
+            original_counts = {
+                "primary": len(pair.primary.patterns),
+                "secondary": len(pair.secondary.patterns),
+            }
+            base_patterns = list(pair.secondary.patterns)
+            result = create_layout_variants(
+                project,
+                pair,
+                target.layout,
+                target,
+                project.read_blocks(target.layout),
+                original_counts,
+                force_kinds={"secondary"},
+            )
+            self.assertTrue(result.changed)
+            self.assertIn("secondary", result.variants)
+            variant = result.variants["secondary"]
+            variant.save()
+            self.assertEqual(variant.name, "gTileset_TestSecondary_TestMap")
+            self.assertEqual(
+                variant.patterns[: len(base_patterns)], base_patterns
+            )
+            base_after = project.load_tileset("gTileset_TestSecondary", "secondary")
+            self.assertEqual(base_after.patterns, base_patterns)
+            layouts = json.loads(
+                (project_dir / "data" / "layouts" / "layouts.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(
+                layouts["layouts"][0]["secondary_tileset"], variant.name
+            )
+            registry_path = (
+                project_dir
+                / "data"
+                / "tilesets"
+                / "secondary"
+                / "test_secondary_variants.json"
+            )
+            registry = json.loads(registry_path.read_text(encoding="utf-8"))
+            self.assertEqual(registry["variants"][0]["name"], variant.name)
+            self.assertTrue(
+                any(
+                    "because --force-variant was requested" in warning
+                    for warning in result.warnings
+                )
+            )
+
+    def test_import_force_variant_cli(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ptmap-force-variant-import-") as temp:
+            project_dir = Path(temp) / "project"
+            make_synthetic_triple_project(project_dir)
+            export_dir = Path(temp) / "export"
+            result = run_tool(
+                "export", "TestMap", "--output", str(export_dir), project=project_dir
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            png_patch(export_dir / "bottom.png", (16, 16), (48, 16))
+            result = run_tool(
+                "import",
+                "TestMap",
+                "--input",
+                str(export_dir),
+                "--on-new",
+                "add-secondary",
+                "--on-remove",
+                "keep",
+                "--force-variant",
+                "secondary",
+                project=project_dir,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            self.assertIn("because --force-variant was requested", result.stdout)
+            layouts = json.loads(
+                (project_dir / "data" / "layouts" / "layouts.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(
+                layouts["layouts"][0]["secondary_tileset"],
+                "gTileset_TestSecondary_TestMap",
+            )
+
     def test_import_overflows_into_variant(self) -> None:
         with tempfile.TemporaryDirectory(prefix="ptmap-variant-import-") as temp:
             project_dir = Path(temp) / "project"
