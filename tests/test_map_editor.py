@@ -1086,6 +1086,87 @@ class SyntheticTripleLayerTests(unittest.TestCase):
             self.assertEqual(len(secondary_after), len(secondary_before))
             self.assertNotEqual(secondary_after[:12], secondary_before)
 
+    def test_replace_does_not_overwrite_tiles_used_by_kept_metatiles(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ptmap-replace-shared-tile-") as temp:
+            project_root = Path(temp) / "project"
+            make_synthetic_triple_project(project_root)
+            project = Project(project_root)
+            target = project.resolve("TestMap")
+            pair = project.load_tileset_pair(target.layout)
+            before_tile = pair.primary.patterns[1]
+            before_signature = pair.metatile_signature(2)
+            export_dir = Path(temp) / "export"
+            result = run_tool(
+                "export", "TestMap", "--output", str(export_dir), project=project_root
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            bottom = export_dir / "bottom.png"
+            with Image.open(bottom) as opened:
+                image = opened.convert("RGBA")
+            for y in range(16, 32):
+                for x in range(16, 32):
+                    image.putpixel((x, y), (0, 0, 255, 255))
+            image.save(bottom, format="PNG")
+            result = run_tool(
+                "import",
+                "TestMap",
+                "--input",
+                str(export_dir),
+                "--on-new",
+                "replace",
+                "--on-remove",
+                "keep",
+                project=project_root,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            updated = Project(project_root)
+            updated_target = updated.resolve("TestMap")
+            updated_pair = updated.load_tileset_pair(updated_target.layout)
+            self.assertEqual(updated_pair.primary.patterns[1], before_tile)
+            self.assertEqual(
+                updated_pair.metatile_signature(2), before_signature
+            )
+
+    def test_replace_keeps_metatile_used_by_border(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ptmap-replace-border-") as temp:
+            project_root = Path(temp) / "project"
+            make_synthetic_triple_project(project_root)
+            border = project_root / "data/layouts/Test/border.bin"
+            border.write_bytes(struct.pack("<4H", 1, 1, 1, 1))
+            primary_metatiles = (
+                project_root
+                / "data/tilesets/primary/test_primary/metatiles.bin"
+            )
+            before = read_u16(primary_metatiles)
+            export_dir = Path(temp) / "export"
+            result = run_tool(
+                "export", "TestMap", "--output", str(export_dir), project=project_root
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            bottom = export_dir / "bottom.png"
+            with Image.open(bottom) as opened:
+                image = opened.convert("RGBA")
+            for y in range(16, 32):
+                for x in range(16, 32):
+                    image.putpixel((x, y), (0, 255, 0, 255))
+            image.save(bottom, format="PNG")
+            result = run_tool(
+                "import",
+                "TestMap",
+                "--input",
+                str(export_dir),
+                "--on-new",
+                "replace",
+                "--on-remove",
+                "keep",
+                project=project_root,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            self.assertRegex(result.stdout, r"replaced metatiles:\s+0")
+            after = read_u16(primary_metatiles)
+            self.assertEqual(after[12:24], before[12:24])
+            self.assertEqual(border.read_bytes(), struct.pack("<4H", 1, 1, 1, 1))
+
     def test_replace_leaves_extra_freed_slot_empty_by_default(self) -> None:
         with tempfile.TemporaryDirectory(prefix="ptmap-replace-empty-") as temp:
             project = Path(temp) / "project"

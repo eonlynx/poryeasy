@@ -313,6 +313,7 @@ class ImportMap:
             "primary": [],
             "secondary": [],
         }
+        self._replace_protected_tiles: set[int] = set()
         self._replace_claimed_tiles: set[int] = set()
         self._replace_tile_writes: dict[int, bytes] = {}
         self._replace_tile_palettes: dict[int, int] = {}
@@ -1221,6 +1222,13 @@ class ImportMap:
                 continue
             if action is None or action in ("skip", "modify-tiles", "modify-metatile"):
                 kept[metatile_id] = kept.get(metatile_id, 0) + 1
+        try:
+            for word in self.project.read_border(self.layout):
+                metatile_id = word & self.project.settings.metatile_id_mask
+                old_ids.add(metatile_id)
+                kept[metatile_id] = kept.get(metatile_id, 0) + 1
+        except MapEditorError:
+            pass
         return {metatile_id for metatile_id in old_ids if kept.get(metatile_id, 0) == 0}
 
     def _build_replace_units(self, groups: list[Group]) -> list[ReplaceUnit]:
@@ -1441,6 +1449,7 @@ class ImportMap:
             protected_tiles.update(
                 entry.tile_index for entry in metatile if entry is not None
             )
+        self._replace_protected_tiles = protected_tiles
 
         references: Counter[int] = Counter()
         for tileset in (self.tilesets.primary, self.tilesets.secondary):
@@ -1717,6 +1726,11 @@ class ImportMap:
             raise MapEditorError(
                 f"Cannot overwrite tile 0x{tile_index:03X} outside {tileset.name}."
             )
+        if tile_index in self._replace_protected_tiles:
+            raise MapEditorError(
+                f"Refusing to overwrite tile 0x{tile_index:03X}: it is still used "
+                "by a metatile that remains in this map."
+            )
         if self._replace_write_journal is not None:
             self._replace_write_journal.append(
                 (tileset, local, tileset.patterns[local])
@@ -1745,6 +1759,7 @@ class ImportMap:
                 for tile in preferred_tiles
                 if 1 <= tile < primary_limit
                 and tile not in self._replace_claimed_tiles
+                and tile not in self._replace_protected_tiles
                 and tile not in animated
             )
         else:
@@ -1753,6 +1768,7 @@ class ImportMap:
                 for tile in preferred_tiles
                 if primary_limit <= tile < self.project.settings.num_tiles_total
                 and tile not in self._replace_claimed_tiles
+                and tile not in self._replace_protected_tiles
                 and tile not in animated
             )
         for tile_index in owned:
@@ -1765,7 +1781,10 @@ class ImportMap:
                 tile for tile in pool if tile not in preferred_tiles
             ]
             for tile_index in ordered:
-                if tile_index in self._replace_claimed_tiles:
+                if (
+                    tile_index in self._replace_claimed_tiles
+                    or tile_index in self._replace_protected_tiles
+                ):
                     continue
                 self._write_replace_tile(tile_index, pattern, palette)
                 return tile_index
@@ -1781,7 +1800,10 @@ class ImportMap:
             tile for tile in pool if tile not in preferred_tiles
         ]
         for tile_index in ordered:
-            if tile_index in self._replace_claimed_tiles:
+            if (
+                tile_index in self._replace_claimed_tiles
+                or tile_index in self._replace_protected_tiles
+            ):
                 continue
             self._write_replace_tile(tile_index, pattern, palette)
             return tile_index
@@ -2061,6 +2083,13 @@ class ImportMap:
             for index, word in enumerate(working)
             if index not in replaced_indices
         }
+        try:
+            kept_ids.update(
+                word & self.project.settings.metatile_id_mask
+                for word in self.project.read_border(self.layout)
+            )
+        except MapEditorError:
+            pass
         kept_ids |= critical
 
         # Reusable tile slots must be collected before the old metatiles are

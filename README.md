@@ -160,10 +160,14 @@ the old metatile identities no longer mean anything. Poryeasy:
 
 * groups the new 16x16 contents by rendered pixels (plus behaviour attribute);
 * counts how many cells in the **edited image** use each new content;
-* finds metatile IDs that will have zero references in this map after all edits;
+* finds metatile IDs that will have zero references in this map and its border
+  after all edits;
 * assigns the most-used new contents to the most-used freed slots first, then
   appends the rest when slots run out (for example 35 old slots, 40 new contents:
   the 35 most-used contents replace and the remaining 5 are added);
+* never overwrites an 8x8 tile slot that is still used by a metatile that
+  remains in the map or border; if the freed slot shared artwork with kept
+  content, it allocates another tile or appends a new one instead;
 * updates the map cells to the assigned IDs and copies the *new* content's
   attributes, not the old slot's attributes.
 
