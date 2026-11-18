@@ -677,22 +677,50 @@ class Tileset:
         return self.global_tile_base + start
 
     def allocate_metatile(
-        self, entries: list[TileRef], attribute: bytes | None = None
+        self,
+        entries: list[TileRef],
+        attribute: bytes | None = None,
+        *,
+        prefer_unused: bool = False,
     ) -> int:
         used = set(self._reserved_metatiles)
         local = None
-        if len(self.metatiles) < self.max_local_metatiles:
-            local = len(self.metatiles)
-        else:
+        usage: set[int] | None = None
+        if prefer_unused or len(self.metatiles) >= self.max_local_metatiles:
             if not self.project.metatile_usage_complete(self):
-                raise MapEditorError(
-                    f"Cannot safely reuse a metatile slot in {self.name}: not every layout "
-                    "could be read, so usage counts are incomplete. Use add-secondary or fix "
-                    "the missing/invalid layout files first."
+                if len(self.metatiles) < self.max_local_metatiles:
+                    local = len(self.metatiles)
+                else:
+                    raise MapEditorError(
+                        f"Cannot safely reuse a metatile slot in {self.name}: not every layout "
+                        "could be read, so usage counts are incomplete. Use add-secondary or fix "
+                        "the missing/invalid layout files first."
+                    )
+            else:
+                usage = self.project.global_metatile_usage().get(
+                    (self.kind, str(self.directory)), set()
                 )
-            usage = self.project.global_metatile_usage().get(
-                (self.kind, str(self.directory)), set()
-            )
+                for candidate in range(len(self.metatiles)):
+                    global_id = self.global_metatile_base + candidate
+                    if candidate in usage or candidate in used:
+                        continue
+                    if self.project.is_protected_metatile_id(global_id, self.name):
+                        continue
+                    local = candidate
+                    break
+        if local is None and len(self.metatiles) < self.max_local_metatiles:
+            local = len(self.metatiles)
+        if local is None:
+            if usage is None:
+                if not self.project.metatile_usage_complete(self):
+                    raise MapEditorError(
+                        f"Cannot safely reuse a metatile slot in {self.name}: not every layout "
+                        "could be read, so usage counts are incomplete. Use add-secondary or fix "
+                        "the missing/invalid layout files first."
+                    )
+                usage = self.project.global_metatile_usage().get(
+                    (self.kind, str(self.directory)), set()
+                )
             for candidate in range(len(self.metatiles)):
                 global_id = self.global_metatile_base + candidate
                 if candidate in usage or candidate in used:

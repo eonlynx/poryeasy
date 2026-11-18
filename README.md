@@ -209,11 +209,15 @@ overhauls, commit after each phase so you can compare/roll back.
 
 Current behavior when a new block does not exist anywhere depends on the mode:
 
-* `add-secondary`/`add-primary` use a globally-unused slot when possible,
-  otherwise append to the chosen tileset.
+* `add-secondary`/`add-primary` use a globally-unused or already-transparent
+  slot when possible, otherwise append to the chosen tileset.
 * `replace` (option 5) first reuses metatile slots that become unused by this
   map after the edit, then appends the excess. This is the mode for the
   "old map used 35 metatiles, new map uses 40" workflow.
+* If the edited map has fewer new contents than freed slots, the remaining
+  freed slots stay empty instead of being filled with duplicate content.
+* Newly added metatiles are assigned in row-major order of their first
+  appearance in the map, filling the lowest free slots first.
 
 Replace mode does not need to know which old metatile was "the ground" or "the
 house". It only needs the set of slots that are free after the edit and the new
@@ -567,6 +571,31 @@ available for future additions. It does not compact/shift metatile IDs, because
 Porytiles and the game source contain hard-coded metatile labels (doors, etc.).
 Metatiles named in `include/constants/metatile_labels.h` are never cleared and a
 note is printed if they become unused.
+
+### Reusing existing free slots (default)
+
+Before every import, Poryeasy also clears slots in the map's primary and
+secondary tilesets that have **zero usages in every readable map and border**.
+This captures pre-existing holes (for example `gTileset_TrainerHill` from
+`0x3D0` onward) and any slot that was emptied manually. New content fills those
+slots from the lowest ID upward before appending new metatiles.
+
+A metatile is treated as already free when all of its referenced 8x8 patterns
+are fully transparent. Palettes use index 0 as the GBA transparency colour, so
+this checks the rendered pattern pixels rather than only whether the entry
+literally points at tile 0. Such slots are available without rewriting them.
+
+The feature is enabled by default. Disable it with:
+
+```sh
+... import LittlerootTown --no-reuse-unused-metatiles
+```
+
+In replace mode, freed slots that receive no new content are left empty when
+this option is on, instead of being filled with duplicates of already-replaced
+content. Slots still used by another map are kept intact so those maps do not
+lose their art. With `--no-reuse-unused-metatiles`, the previous duplicate-fill
+behavior is used, and no pre-import global scan/clearing is performed.
 
 An optional second pass can clear 8x8 tile graphics that are no longer
 referenced by any metatile:

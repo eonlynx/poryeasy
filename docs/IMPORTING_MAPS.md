@@ -60,6 +60,7 @@ Current defaults:
 - `--on-remove keep`
 - `--on-extra-animation-row skip`
 - `--palette-mode smart`
+- `--reuse-unused-metatiles` (on; disable with `--no-reuse-unused-metatiles`)
 
 Use `--dry-run` to validate without writing files.
 
@@ -76,6 +77,15 @@ map and tilesets in Porymap after importing.
 
 - Replace mode only frees a metatile when it has zero references in the edited
   map. Doors and critical animated metatiles are protected.
+- Before importing, slots with zero usages across every readable map and border
+  are cleared and reused first. Slots that are already fully transparent are
+  free without being rewritten. Disable this with
+  `--no-reuse-unused-metatiles`.
+- If replace mode has fewer new contents than freed slots, the remaining slots
+  stay empty instead of being filled with duplicates. Slots still used by other
+  maps are kept intact.
+- New metatiles are allocated in row-major order of first appearance in the
+  map, filling the lowest free slot first.
 - `smart` palette mode counts real tileset pixels, keeps at least one colour
   per hue family, and distributes the remaining slots by usage.
 - Old tile indices are remapped to the closest colours in the new palettes.

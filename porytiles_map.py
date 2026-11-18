@@ -105,6 +105,7 @@ def cmd_import(args: argparse.Namespace) -> int:
         force_palette_edits=args.force_palette_edits,
         palette_mode=args.palette_mode,
         force_variant=args.force_variant,
+        reuse_unused_metatiles=args.reuse_unused_metatiles,
     )
     result = importer.run()
 
@@ -112,8 +113,12 @@ def cmd_import(args: argparse.Namespace) -> int:
         result.changes == 0
         and not result.animation_changed
         and not result.palette_changed
+        and not result.cleared_unused_primary
+        and not result.cleared_unused_secondary
     ):
         print(f"No changes detected in {input_dir}.")
+        for warning in result.warnings:
+            print(f"  warning: {warning}")
         return 0
 
     print()
@@ -164,6 +169,13 @@ def cmd_import(args: argparse.Namespace) -> int:
             f"secondary {result.secondary_free_tiles}"
         )
     print(f"  skipped blocks:       {result.skipped}")
+    if result.cleared_unused_primary or result.cleared_unused_secondary:
+        print(
+            f"  cleared unused:       primary {result.cleared_unused_primary}, "
+            f"secondary {result.cleared_unused_secondary}"
+        )
+    if result.left_empty_replace_slots:
+        print(f"  empty freed slots:    {result.left_empty_replace_slots}")
     if result.removed_metatiles:
         print(f"  cleared metatiles:    {result.removed_metatiles}")
     if result.cleared_tiles:
@@ -440,6 +452,15 @@ def build_parser() -> argparse.ArgumentParser:
             "How to handle edited colours outside the active palettes: smart rewrites "
             "least-used slots (default), replace rewrites the whole affected palette, "
             "nearest maps to existing colours, error refuses"
+        ),
+    )
+    import_parser.add_argument(
+        "--no-reuse-unused-metatiles",
+        dest="reuse_unused_metatiles",
+        action="store_false",
+        help=(
+            "Do not clear metatile slots with zero usages across every map before "
+            "importing (default: clear them and reuse them for new content)"
         ),
     )
     import_parser.add_argument(

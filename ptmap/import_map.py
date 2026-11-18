@@ -157,6 +157,9 @@ class ImportResult:
     skipped: int = 0
     removed_metatiles: int = 0
     cleared_tiles: int = 0
+    cleared_unused_primary: int = 0
+    cleared_unused_secondary: int = 0
+    left_empty_replace_slots: int = 0
     backup_dir: Path | None = None
     written: list[Path] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
@@ -253,6 +256,7 @@ class ImportMap:
         force_palette_edits: bool = False,
         palette_mode: str = "smart",
         force_variant: str | None = None,
+        reuse_unused_metatiles: bool = True,
     ) -> None:
         self.project = project
         self.target = target
@@ -278,6 +282,8 @@ class ImportMap:
         self.force_palette_edits = force_palette_edits
         self.palette_mode = palette_mode
         self.force_variant = force_variant
+        self.reuse_unused_metatiles = reuse_unused_metatiles
+        self._metatiles_cleared = False
         self._sheet_cell_index: dict[bytes, list[int]] = {}
         self._change_allowed_banks: dict[int, range] = {}
         self._replace_plan_units: list[ReplaceUnit] | None = None
@@ -675,9 +681,16 @@ class ImportMap:
         }
 
     def _targeted_reference_counts(
-        self, metatile_ids: set[int]
+        self,
+        metatile_ids: set[int],
+        *,
+        exclude_layout_id: str | None = None,
     ) -> tuple[dict[int, int], set[int], dict[int, set[str]]]:
-        """Counts map/border usages only in layouts that can reference these IDs."""
+        """Counts map/border usages only in layouts that can reference these IDs.
+
+        ``exclude_layout_id`` ignores one layout, which is useful to measure
+        whether a metatile is used outside the map currently being imported.
+        """
         counts = {metatile_id: 0 for metatile_id in metatile_ids}
         incomplete: set[int] = set()
         incomplete_layouts: dict[int, set[str]] = {
@@ -696,6 +709,8 @@ class ImportMap:
         secondary_ids = metatile_ids - primary_ids
 
         for layout in self.project.layouts.values():
+            if exclude_layout_id is not None and layout.id == exclude_layout_id:
+                continue
             can_primary = layout.primary_tileset == primary_name
             can_secondary = layout.secondary_tileset == secondary_name
             if not can_primary and not can_secondary:
@@ -721,11 +736,11 @@ class ImportMap:
                     incomplete_layouts[metatile_id].add(layout.id)
             for word in blocks:
                 metatile_id = word & self.project.settings.metatile_id_mask
-                if metatile_id in counts:
+                if metatile_id in relevant_ids:
                     counts[metatile_id] += 1
             for word in border:
                 metatile_id = word & self.project.settings.metatile_id_mask
-                if metatile_id in counts:
+                if metatile_id in relevant_ids:
                     counts[metatile_id] += 1
         return counts, incomplete, incomplete_layouts
 
@@ -1316,14 +1331,16 @@ class ImportMap:
                 reserved_units[kind].append(candidate)
                 free_slots[kind].remove(metatile_id)
 
-        # Secondary leftovers get a duplicate of the closest already-built
-        # content. Primary leftovers are filled in _apply_replace_groups,
-        # after the real primary content has been resolved successfully.
-        for metatile_id in list(free_slots["secondary"]):
-            duplicate = self._best_duplicate_for_slot(metatile_id, reserved_units)
-            units.append(duplicate)
-            reserved_units["secondary"].append(duplicate)
-            free_slots["secondary"].remove(metatile_id)
+        # Secondary leftovers are only duplicated when unused-slot reuse is
+        # disabled. With the default mode they stay empty for future content;
+        # _apply_replace_groups clears them and reports the count.
+        # Primary leftovers are handled in _apply_replace_groups.
+        if not self.reuse_unused_metatiles:
+            for metatile_id in list(free_slots["secondary"]):
+                duplicate = self._best_duplicate_for_slot(metatile_id, reserved_units)
+                units.append(duplicate)
+                reserved_units["secondary"].append(duplicate)
+                free_slots["secondary"].remove(metatile_id)
 
         self.result.replace_assigned = sum(
             1 for unit in units if unit.assigned_id is not None
@@ -1939,10 +1956,43 @@ class ImportMap:
         # Clear every replacement slot first. The tile graphics stay in place
         # until a new tile actually claims that slot, which is what makes
         # tile-level replacement possible without growing the primary pool.
+        # Freed leftovers whose art is still used outside this layout must stay
+        # intact; the rest can remain empty for future additions.
         assigned_slots = {
             unit.assigned_id for unit in units if unit.assigned_id is not None
         }
-        for metatile_id in assigned_slots:
+        empty_slots: set[int] = set()
+        external_incomplete: set[int] = set()
+        external_usage: dict[int, int] = {}
+        if self.reuse_unused_metatiles:
+            candidates = freed_ids - critical
+            if candidates:
+                external_usage, external_incomplete, _ = (
+                    self._targeted_reference_counts(
+                        candidates, exclude_layout_id=self.layout.id
+                    )
+                )
+            empty_slots = {
+                metatile_id
+                for metatile_id in candidates
+                if metatile_id not in assigned_slots
+                and metatile_id not in external_incomplete
+                and external_usage.get(metatile_id, 0) == 0
+            }
+            self.result.left_empty_replace_slots += len(empty_slots)
+            if empty_slots:
+                self.result.warnings.append(
+                    f"Left {len(empty_slots)} freed metatile slot(s) empty instead of "
+                    "duplicating already-replaced content."
+                )
+            kept_leftovers = external_incomplete - assigned_slots
+            if kept_leftovers:
+                self.result.warnings.append(
+                    f"Kept {len(kept_leftovers)} freed metatile slot(s) intact because "
+                    "not every layout using this tileset pair could be read."
+                )
+        slots_to_clear = set(assigned_slots) | empty_slots
+        for metatile_id in slots_to_clear:
             owner = self.tilesets.metatile_owner(metatile_id)
             local = metatile_id - owner.global_metatile_base
             owner.metatiles[local] = [
@@ -1996,7 +2046,9 @@ class ImportMap:
                 new_id = existing
             else:
                 new_id = self.tilesets.secondary.allocate_metatile(
-                    entries, unit.attribute
+                    entries,
+                    unit.attribute,
+                    prefer_unused=self.reuse_unused_metatiles,
                 )
                 self.result.added_metatiles += 1
             for member in unit.changes:
@@ -2079,6 +2131,30 @@ class ImportMap:
         for metatile_id in primary_slots:
             if metatile_id in successful_slots:
                 continue
+            if self.reuse_unused_metatiles:
+                if metatile_id in empty_slots:
+                    continue
+                if (
+                    metatile_id not in external_incomplete
+                    and external_usage.get(metatile_id, 0) == 0
+                ):
+                    empty_slots.add(metatile_id)
+                    self.result.left_empty_replace_slots += 1
+                    continue
+                snapshot = self._replace_snapshots.get(metatile_id)
+                if snapshot is not None:
+                    owner = self.tilesets.metatile_owner(metatile_id)
+                    local = metatile_id - owner.global_metatile_base
+                    owner.metatiles[local] = snapshot
+                    owner.attributes[local] = self._replace_attribute_snapshots.get(
+                        metatile_id, bytes(owner.attribute_size)
+                    )
+                    owner.dirty_metadata = True
+                    self.result.warnings.append(
+                        f"Freed primary slot 0x{metatile_id:03X} is still used outside "
+                        "this layout; its original metatile was kept."
+                    )
+                continue
             try:
                 duplicate = self._best_duplicate_for_slot(
                     metatile_id, {"primary": successful_primary, "secondary": []}
@@ -2141,6 +2217,9 @@ class ImportMap:
             (unit for unit in units if id(unit) not in handled),
             key=lambda unit: (
                 0 if unit.assigned_id is None else 1,
+                min(change.index for change in unit.changes)
+                if unit.assigned_id is None and unit.changes
+                else 0,
                 -len(unit.changes),
                 unit.assigned_id if unit.assigned_id is not None else 1 << 30,
             ),
@@ -2396,7 +2475,11 @@ class ImportMap:
                     else self.tilesets.primary
                 )
                 attribute = self.tilesets.attribute(group.original_id)
-                new_id = target_tileset.allocate_metatile(entries, attribute)
+                new_id = target_tileset.allocate_metatile(
+                    entries,
+                    attribute,
+                    prefer_unused=self.reuse_unused_metatiles,
+                )
                 self.result.added_metatiles += 1
             for change in group.changes:
                 working[change.index] = self._set_metatile_id(
@@ -2693,6 +2776,98 @@ class ImportMap:
                 f"{tileset.name} is Porytiles-managed. Its porytiles_src/ assets are now "
                 f"stale; run 'porytiles decompile-tileset {tileset.name}' to refresh them."
             )
+
+    def _metatile_is_visually_empty(self, metatile: list[TileRef]) -> bool:
+        """True when every referenced 8x8 pattern is fully transparent.
+
+        Palette index 0 is the GBA transparency colour, so a metatile whose
+        visible pixels are all index 0 is already a free slot even if its
+        entries do not literally point at tile 0.
+        """
+        for entry in metatile:
+            if entry is None or entry.tile_index == 0:
+                continue
+            owner = self.tilesets.tileset_for_tile(entry.tile_index)
+            local = entry.tile_index - owner.global_tile_base
+            if not 0 <= local < len(owner.patterns):
+                return False
+            if any(owner.patterns[local]):
+                return False
+        return True
+
+    def _reuse_unused_metatiles(self) -> None:
+        """Clears globally unused metatile slots so new content can reuse them."""
+        if not self.reuse_unused_metatiles:
+            return
+        critical = self._critical_metatile_ids()
+        pairs: list[tuple[Tileset, set[int]]] = []
+        all_ids: set[int] = set()
+        for tileset in (self.tilesets.primary, self.tilesets.secondary):
+            base = tileset.global_metatile_base
+            ids = set(range(base, base + len(tileset.metatiles)))
+            pairs.append((tileset, ids))
+            all_ids.update(ids)
+        if not all_ids:
+            return
+
+        counts, incomplete, incomplete_layouts = self._targeted_reference_counts(
+            all_ids
+        )
+        plans: list[tuple[Tileset, list[int]]] = []
+        for tileset, ids in pairs:
+            if ids & incomplete:
+                layouts = sorted(
+                    {
+                        layout
+                        for metatile_id in ids & incomplete
+                        for layout in incomplete_layouts.get(metatile_id, set())
+                    }
+                )
+                self.result.warnings.append(
+                    f"Cannot clear unused metatiles in {tileset.name}: unreadable "
+                    f"layout(s): {', '.join(layouts[:8])}; skipped."
+                )
+                continue
+            slots: list[int] = []
+            for local, metatile in enumerate(tileset.metatiles):
+                metatile_id = tileset.global_metatile_base + local
+                if counts.get(metatile_id, 0) != 0:
+                    continue
+                if metatile_id in critical:
+                    continue
+                if self.project.is_protected_metatile_id(metatile_id, tileset.name):
+                    continue
+                if self._metatile_is_visually_empty(metatile):
+                    # Already fully transparent: available without touching it.
+                    continue
+                slots.append(local)
+            if slots:
+                plans.append((tileset, slots))
+
+        if not plans:
+            return
+        for tileset, slots in plans:
+            for local in slots:
+                tileset.metatiles[local] = [
+                    TileRef(0, 0, False, False)
+                    for _ in range(tileset.entries_per_metatile)
+                ]
+                tileset.attributes[local] = bytes(tileset.attribute_size)
+            tileset.dirty_metadata = True
+            if tileset.kind == "primary":
+                self.result.cleared_unused_primary += len(slots)
+            else:
+                self.result.cleared_unused_secondary += len(slots)
+            self.result.warnings.append(
+                f"Cleared {len(slots)} unused metatile slot(s) in {tileset.name}; "
+                "new content will reuse them first."
+            )
+        self._metatiles_cleared = True
+        self.project.invalidate_metatile_usage()
+        self.project.invalidate_tile_usage()
+        for tileset in (self.tilesets.primary, self.tilesets.secondary):
+            tileset.invalidate_caches()
+        self.tilesets.invalidate_signature_index()
 
     def _handle_removals(
         self,
@@ -3334,6 +3509,7 @@ class ImportMap:
                     f"but '{self.target.query}' resolves to {self.layout.id}."
                 )
 
+        self._reuse_unused_metatiles()
         palette_result = apply_palette_sheet(
             self.project,
             self.tilesets,
@@ -3380,7 +3556,9 @@ class ImportMap:
 
         changes = self.load_changes()
         if not changes:
-            if animation_result.changed and not self.dry_run:
+            if not self.dry_run and (
+                animation_result.changed or self._metatiles_cleared
+            ):
                 for tileset in (self.tilesets.primary, self.tilesets.secondary):
                     self.result.written.extend(tileset.save())
             return self.result

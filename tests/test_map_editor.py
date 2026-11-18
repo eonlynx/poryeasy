@@ -35,6 +35,7 @@ from ptmap.animations import (
     scan_animation_catalog,
     scan_project_animations,
 )
+from ptmap.import_map import ImportMap
 from ptmap.palette_planner import plan_bank_colors
 from ptmap.project import Project
 from ptmap.tileset import TileRef, TilesetPair
@@ -574,12 +575,14 @@ class SyntheticTripleLayerTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
             self.assertIn("added metatiles:      1", result.stdout)
             blocks = read_u16(project / "data/layouts/Test/map.bin")
-            self.assertEqual(blocks[5] & 0x3FF, 513)
+            # The already-transparent secondary slot is reused instead of
+            # growing the tileset with a new metatile.
+            self.assertEqual(blocks[5] & 0x3FF, 512)
             metatiles = read_u16(
                 project / "data/tilesets/secondary/test_secondary/metatiles.bin"
             )
-            self.assertEqual(len(metatiles), 24)
-            self.assertEqual(len(metatiles) // 12, 2)
+            self.assertEqual(len(metatiles), 12)
+            self.assertEqual(len(metatiles) // 12, 1)
 
     def test_moving_animated_block_preserves_animation(self) -> None:
         with tempfile.TemporaryDirectory(prefix="ptmap-anim-move-") as temp:
@@ -866,6 +869,24 @@ class SyntheticTripleLayerTests(unittest.TestCase):
             )
             self.assertEqual(attributes[-1] & 0xFF, 1)
 
+    def test_visual_empty_uses_transparency_not_entry_zero(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ptmap-transparent-") as temp:
+            project_root = Path(temp) / "project"
+            make_synthetic_triple_project(project_root)
+            project = Project(project_root)
+            target = project.resolve("TestMap")
+            importer = ImportMap(
+                project, target, Path(temp) / "unused", interactive=False
+            )
+            pair = importer.tilesets
+            # A nonzero tile slot whose 8x8 pattern is entirely transparent.
+            pair.secondary.patterns[1] = bytes(64)
+            transparent_tile = pair.secondary.global_tile_base + 1
+            entries = [TileRef(transparent_tile, 0, False, False)] * 12
+            self.assertTrue(importer._metatile_is_visually_empty(entries))
+            pair.secondary.patterns[1] = bytes([1] * 64)
+            self.assertFalse(importer._metatile_is_visually_empty(entries))
+
     def test_replace_assigns_freed_slot_to_most_used_content(self) -> None:
         with tempfile.TemporaryDirectory(prefix="ptmap-replace-usage-") as temp:
             project = Path(temp) / "project"
@@ -928,7 +949,218 @@ class SyntheticTripleLayerTests(unittest.TestCase):
             self.assertEqual(a1, a2)
             self.assertEqual(a1, 2)
             self.assertNotEqual(b, 2)
-            self.assertEqual(read_u16(secondary_metatiles)[:12], secondary_before)
+            # The existing empty secondary slot is reused instead of growing
+            # the tileset with an identical appended metatile.
+            secondary_after = read_u16(secondary_metatiles)
+            self.assertEqual(len(secondary_after), len(secondary_before))
+            self.assertNotEqual(secondary_after[:12], secondary_before)
+
+    def test_replace_leaves_extra_freed_slot_empty_by_default(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ptmap-replace-empty-") as temp:
+            project = Path(temp) / "project"
+            make_synthetic_triple_project(project)
+            export_dir = Path(temp) / "export"
+            result = run_tool(
+                "export", "TestMap", "--output", str(export_dir), project=project
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+
+            # Metatiles 1 and 2 are each used exactly once. Painting both
+            # cells with the same new pattern builds one replacement unit,
+            # leaving the other freed slot with nothing to put in it. Paint
+            # all layers so upper layers cannot hide the edit.
+            for name in ("bottom", "middle", "top"):
+                layer_path = export_dir / f"{name}.png"
+                with Image.open(layer_path) as opened:
+                    layer = opened.convert("RGBA")
+                for cell in ((1, 1), (1, 0)):
+                    for y in range(16):
+                        for x in range(16):
+                            layer.putpixel(
+                                (cell[0] * 16 + x, cell[1] * 16 + y),
+                                (0, 255, 0, 255),
+                            )
+                layer.save(layer_path, format="PNG")
+
+            result = run_tool(
+                "import",
+                "TestMap",
+                "--input",
+                str(export_dir),
+                "--on-new",
+                "replace",
+                "--on-remove",
+                "keep",
+                project=project,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            self.assertRegex(result.stdout, r"empty freed slots:\s+1")
+            words = read_u16(project / "data/tilesets/primary/test_primary/metatiles.bin")
+            self.assertEqual(words[24:36], [0] * 12)
+            blocks = read_u16(project / "data/layouts/Test/map.bin")
+            self.assertEqual(blocks[1 * 4 + 1] & 0x3FF, 1)
+            self.assertEqual(blocks[0 * 4 + 1] & 0x3FF, 1)
+
+    def test_replace_duplicates_extra_freed_slot_when_reuse_disabled(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ptmap-replace-legacy-") as temp:
+            project = Path(temp) / "project"
+            make_synthetic_triple_project(project)
+            export_dir = Path(temp) / "export"
+            result = run_tool(
+                "export", "TestMap", "--output", str(export_dir), project=project
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            for name in ("bottom", "middle", "top"):
+                layer_path = export_dir / f"{name}.png"
+                with Image.open(layer_path) as opened:
+                    layer = opened.convert("RGBA")
+                for cell in ((1, 1), (1, 0)):
+                    for y in range(16):
+                        for x in range(16):
+                            layer.putpixel(
+                                (cell[0] * 16 + x, cell[1] * 16 + y),
+                                (0, 255, 0, 255),
+                            )
+                layer.save(layer_path, format="PNG")
+
+            result = run_tool(
+                "import",
+                "TestMap",
+                "--input",
+                str(export_dir),
+                "--on-new",
+                "replace",
+                "--on-remove",
+                "keep",
+                "--no-reuse-unused-metatiles",
+                project=project,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            self.assertNotIn("empty freed slots:", result.stdout)
+            words = read_u16(project / "data/tilesets/primary/test_primary/metatiles.bin")
+            self.assertEqual(words[24:36], words[12:24])
+
+    def test_replace_excess_added_in_map_appearance_order(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ptmap-replace-order-") as temp:
+            project = Path(temp) / "project"
+            make_synthetic_triple_project(project)
+            export_dir = Path(temp) / "export"
+            result = run_tool(
+                "export", "TestMap", "--output", str(export_dir), project=project
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            bottom = export_dir / "bottom.png"
+            with Image.open(bottom) as opened:
+                image = opened.convert("RGBA")
+
+            patterns = [
+                lambda x, y: (255, 0, 0, 255) if (x + y) % 3 else (0, 255, 0, 255),
+                lambda x, y: (0, 0, 255, 255) if (x * 2 + y) % 3 else (255, 0, 0, 255),
+                lambda x, y: (0, 255, 0, 255) if (x // 3 + y // 5) % 2 else (0, 0, 255, 255),
+                lambda x, y: (255, 0, 0, 255) if (x // 5 + y // 3) % 2 else (0, 0, 255, 255),
+            ]
+            for index, cell in enumerate(((0, 0), (1, 0), (2, 0), (3, 0))):
+                for y in range(16):
+                    for x in range(16):
+                        image.putpixel(
+                            (cell[0] * 16 + x, cell[1] * 16 + y),
+                            patterns[index](x, y),
+                        )
+            # (0, 1) uses the only other replaceable metatile, so it receives
+            # the single freed primary slot. The four cells above are excess.
+            for y in range(16):
+                for x in range(16):
+                    color = (
+                        (0, 255, 0, 255)
+                        if (x // 2 + y // 6) % 2
+                        else (255, 0, 0, 255)
+                    )
+                    image.putpixel((0 * 16 + x, 1 * 16 + y), color)
+            image.save(bottom, format="PNG")
+
+            result = run_tool(
+                "import",
+                "TestMap",
+                "--input",
+                str(export_dir),
+                "--on-new",
+                "replace",
+                "--on-remove",
+                "keep",
+                project=project,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            blocks = read_u16(project / "data/layouts/Test/map.bin")
+            ids = [blocks[row * 4 + column] & 0x3FF for row, column in (
+                (0, 0),
+                (0, 1),
+                (0, 2),
+                (0, 3),
+            )]
+            self.assertEqual(ids, [512, 513, 514, 515])
+            # The freed primary slot cannot host this content, so it joins the
+            # append queue after the earlier cells, in map appearance order.
+            self.assertEqual(blocks[1 * 4 + 0] & 0x3FF, 516)
+
+    def test_unused_metatile_is_cleared_and_reused_before_appending(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ptmap-clear-reuse-") as temp:
+            project = Path(temp) / "project"
+            make_synthetic_triple_project(project)
+            secondary = (
+                project / "data" / "tilesets" / "secondary" / "test_secondary"
+            )
+            words = read_u16(secondary / "metatiles.bin")
+            words.extend([1 | (1 << 12)] * 12)
+            (secondary / "metatiles.bin").write_bytes(
+                struct.pack(f"<{len(words)}H", *words)
+            )
+            attrs = read_u16(secondary / "metatile_attributes.bin")
+            attrs.append(0)
+            (secondary / "metatile_attributes.bin").write_bytes(
+                struct.pack(f"<{len(attrs)}H", *attrs)
+            )
+            # Slot 0 is now used by the map, leaving non-empty slot 1 unused.
+            layout_bin = project / "data/layouts/Test/map.bin"
+            blocks = read_u16(layout_bin)
+            blocks[0] = 512
+            layout_bin.write_bytes(struct.pack(f"<{len(blocks)}H", *blocks))
+
+            export_dir = Path(temp) / "export"
+            result = run_tool(
+                "export", "TestMap", "--output", str(export_dir), project=project
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            bottom = export_dir / "bottom.png"
+            with Image.open(bottom) as opened:
+                image = opened.convert("RGBA")
+            for y in range(16):
+                for x in range(16):
+                    color = (
+                        (0, 0, 255, 255)
+                        if (x // 3 + y // 4) % 2
+                        else (0, 255, 0, 255)
+                    )
+                    image.putpixel((3 * 16 + x, 3 * 16 + y), color)
+            image.save(bottom, format="PNG")
+
+            result = run_tool(
+                "import",
+                "TestMap",
+                "--input",
+                str(export_dir),
+                "--on-new",
+                "add-secondary",
+                "--on-remove",
+                "keep",
+                project=project,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            self.assertRegex(
+                result.stdout, r"cleared unused:\s+primary 0, secondary 1"
+            )
+            blocks = read_u16(project / "data/layouts/Test/map.bin")
+            self.assertEqual(blocks[3 * 4 + 3] & 0x3FF, 513)
+            self.assertEqual(len(read_u16(secondary / "metatiles.bin")), 24)
 
     def test_animated_tile_edit_remaps_to_animated_metatile(self) -> None:
         with tempfile.TemporaryDirectory(prefix="ptmap-anim-") as temp:
@@ -1222,6 +1454,7 @@ class ExpansionTests(unittest.TestCase):
             "skip",
             "--on-remove",
             "clear",
+            "--no-reuse-unused-metatiles",
             project=self.project,
         )
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
