@@ -314,7 +314,7 @@ class ImportMap:
             "secondary": [],
         }
         self._replace_protected_tiles: set[int] = set()
-        self._reserved_unused_ids: set[int] = set()
+        self._unused_before_ids: set[int] = set()
         self._replace_claimed_tiles: set[int] = set()
         self._replace_tile_writes: dict[int, bytes] = {}
         self._replace_tile_palettes: dict[int, int] = {}
@@ -2092,7 +2092,7 @@ class ImportMap:
         except MapEditorError:
             pass
         if self.empty_metatiles_only:
-            kept_ids.update(self._reserved_unused_ids)
+            kept_ids.update(self._unused_before_ids)
         kept_ids |= critical
 
         # Reusable tile slots must be collected before the old metatiles are
@@ -2972,7 +2972,6 @@ class ImportMap:
         """Clears globally unused metatile slots so new content can reuse them."""
         if not self.reuse_unused_metatiles:
             return
-        self._reserved_unused_ids.clear()
         critical = self._critical_metatile_ids()
         pairs: list[tuple[Tileset, set[int]]] = []
         all_ids: set[int] = set()
@@ -2983,6 +2982,17 @@ class ImportMap:
             all_ids.update(ids)
         if not all_ids:
             return
+        before_ids = {
+            word & self.project.settings.metatile_id_mask for word in self.blocks
+        }
+        try:
+            before_ids.update(
+                word & self.project.settings.metatile_id_mask
+                for word in self.project.read_border(self.layout)
+            )
+        except MapEditorError:
+            pass
+        self._unused_before_ids = all_ids - before_ids
 
         counts, incomplete, incomplete_layouts = self._targeted_reference_counts(
             all_ids
@@ -3012,7 +3022,6 @@ class ImportMap:
                     # Keep unused art available for other maps/tools; the
                     # allocator will only consider unreserved empty slots.
                     tileset._reserved_metatiles.add(local)
-                    self._reserved_unused_ids.add(metatile_id)
                     kept.append(local)
                 if not kept:
                     continue
