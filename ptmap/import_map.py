@@ -98,6 +98,7 @@ class Change:
     animated_originals: list[tuple[int, int, int]] = field(default_factory=list)
     animated_state_remap: bool = False
     remap_target_id: int | None = None
+    changed_pixels: int = 0
 
     @property
     def label(self) -> str:
@@ -160,6 +161,8 @@ class ImportResult:
     cleared_unused_primary: int = 0
     cleared_unused_secondary: int = 0
     left_empty_replace_slots: int = 0
+    tiny_edits: int = 0
+    ignored_palette_colors: int = 0
     backup_dir: Path | None = None
     written: list[Path] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
@@ -257,6 +260,9 @@ class ImportMap:
         palette_mode: str = "smart",
         force_variant: str | None = None,
         reuse_unused_metatiles: bool = True,
+        palette_min_share: float = 0.005,
+        tiny_edit_pixels: int = 4,
+        tiny_edit_policy: str = "warn",
     ) -> None:
         self.project = project
         self.target = target
@@ -283,6 +289,9 @@ class ImportMap:
         self.palette_mode = palette_mode
         self.force_variant = force_variant
         self.reuse_unused_metatiles = reuse_unused_metatiles
+        self.palette_min_share = max(0.0, palette_min_share)
+        self.tiny_edit_pixels = max(0, tiny_edit_pixels)
+        self.tiny_edit_policy = tiny_edit_policy
         self._metatiles_cleared = False
         self._sheet_cell_index: dict[bytes, list[int]] = {}
         self._change_allowed_banks: dict[int, range] = {}
@@ -548,6 +557,10 @@ class ImportMap:
                                 (layer, subtile, entry.tile_index)
                             )
             old_index = self.old_index_by_new_index[index]
+            changed_pixels = sum(
+                visualize_diff(original_layers[layer], edited_layers[layer])
+                for layer in changed_layers
+            )
             changes.append(
                 Change(
                     index=index,
@@ -561,6 +574,7 @@ class ImportMap:
                     old_index=old_index,
                     is_new_cell=old_index is None,
                     animated_originals=animated_originals,
+                    changed_pixels=changed_pixels,
                 )
             )
 
@@ -3383,60 +3397,181 @@ class ImportMap:
             )
         return remapped
 
-    def _plan_edited_palettes(self, changes: list[Change]) -> None:
+    def _entry_color_counts(
+        self, entry: TileRef, cache: dict[tuple[int, int], Counter]
+    ) -> Counter[tuple[int, int, int]]:
+        key = (entry.tile_index, entry.palette)
+        counts = cache.get(key)
+        if counts is None:
+            palette = self.tilesets.palette_for(entry.palette)
+            pattern = self.tilesets.tileset_for_tile(entry.tile_index).pattern_at(
+                entry.tile_index
+            )
+            counts = Counter()
+            for value in pattern:
+                if value:
+                    counts[palette[value]] += 1
+            cache[key] = counts
+        return counts
+
+    def _add_entry_usage(
+        self,
+        entry: TileRef | None,
+        target: dict[int, Counter],
+        cache: dict[tuple[int, int], Counter],
+    ) -> None:
+        if entry is None or entry.tile_index == 0:
+            return
+        target.setdefault(entry.palette, Counter()).update(
+            self._entry_color_counts(entry, cache)
+        )
+
+    def _metatile_color_usage(
+        self,
+        metatile_id: int,
+        cache: dict[tuple[int, int], Counter],
+        metatile_cache: dict[int, dict[int, Counter]],
+    ) -> dict[int, Counter]:
+        usage = metatile_cache.get(metatile_id)
+        if usage is not None:
+            return usage
+        usage = {}
+        try:
+            metatile = self.tilesets.metatile(metatile_id)
+        except MapEditorError:
+            metatile_cache[metatile_id] = usage
+            return usage
+        for entry in metatile:
+            self._add_entry_usage(entry, usage, cache)
+        metatile_cache[metatile_id] = usage
+        return usage
+
+    def _add_metatile_usage(
+        self,
+        metatile_id: int,
+        target: dict[int, Counter],
+        cache: dict[tuple[int, int], Counter],
+        metatile_cache: dict[int, dict[int, Counter]],
+    ) -> None:
+        for bank, counts in self._metatile_color_usage(
+            metatile_id, cache, metatile_cache
+        ).items():
+            target.setdefault(bank, Counter()).update(counts)
+
+    def _plan_edited_palettes(
+        self, changes: list[Change], groups: list[Group]
+    ) -> None:
         if self.palette_mode not in ("smart", "replace"):
             return
-        desired: dict[int, Counter] = {}
-        for change in changes:
-            owner = None
-            entries = None
-            metatile = None
-            if not change.is_new_cell:
+        change_by_index = {change.index: change for change in changes}
+        action_by_index: dict[int, str] = {}
+        for group in groups:
+            for change in group.changes:
+                action_by_index[change.index] = group.action
+        remap_by_index = {
+            change.index: change.remap_target_id
+            for change in changes
+            if change.remap_target_id is not None
+        }
+
+        old_usage: dict[int, Counter] = {}
+        new_usage: dict[int, Counter] = {}
+        entry_cache: dict[tuple[int, int], Counter] = {}
+        metatile_cache: dict[int, dict[int, Counter]] = {}
+
+        for index, word in enumerate(self.blocks):
+            original_id = word & self.project.settings.metatile_id_mask
+            remap_target = remap_by_index.get(index)
+            if remap_target is not None:
+                self._add_metatile_usage(
+                    remap_target, old_usage, entry_cache, metatile_cache
+                )
+                continue
+            change = change_by_index.get(index)
+            action = action_by_index.get(index)
+            if change is None or action in (None, "skip"):
+                self._add_metatile_usage(
+                    original_id, old_usage, entry_cache, metatile_cache
+                )
+                continue
+            if self.tiny_edit_pixels and (
+                change.changed_pixels <= self.tiny_edit_pixels
+            ):
+                # Tiny edits are harmonized: they never influence the palette.
+                self._add_metatile_usage(
+                    original_id, old_usage, entry_cache, metatile_cache
+                )
+                continue
+
+            allowed = self._change_allowed_banks.get(index)
+            if allowed is None:
                 try:
                     owner = self.tilesets.metatile_owner(change.original_id)
-                    metatile = self.tilesets.metatile(change.original_id)
                 except MapEditorError:
                     owner = None
-                    metatile = None
-            allowed = self._change_allowed_banks.get(change.index)
-            if allowed is None:
                 allowed = (
                     range(self.project.settings.num_pals_in_primary)
                     if owner is not None and owner.kind == "primary"
                     else range(self.project.settings.num_pals_total)
                 )
-            for layer in change.changed_layers:
+            try:
+                metatile = self.tilesets.metatile(change.original_id)
+                owner = self.tilesets.metatile_owner(change.original_id)
+            except MapEditorError:
+                metatile = None
+                owner = None
+
+            for layer in range(3):
+                original_entries: list[TileRef | None] = (
+                    owner.entries_for_layer(metatile, layer)
+                    if owner is not None and metatile is not None
+                    else [None] * 4
+                )
                 data = change.edited_layers.get(layer)
-                if data is None:
+                if layer not in change.changed_layers or data is None:
+                    for entry in original_entries:
+                        self._add_entry_usage(entry, old_usage, entry_cache)
                     continue
-                if owner is not None and metatile is not None:
-                    entries = owner.entries_for_layer(metatile, layer)
-                else:
-                    entries = None
                 for subtile in range(4):
-                    sx = (subtile % 2) * TILE_SIZE
-                    sy = (subtile // 2) * TILE_SIZE
-                    patch = patch_from_rgba(data, METATILE_SIZE, sx, sy, TILE_SIZE)
+                    original_sub = normalize_patch(
+                        self._subtile_patch(change.original_layers[layer], subtile)
+                    )
+                    edited_sub = normalize_patch(
+                        self._subtile_patch(data, subtile)
+                    )
+                    entry = (
+                        original_entries[subtile]
+                        if subtile < len(original_entries)
+                        else None
+                    )
+                    if original_sub == edited_sub:
+                        self._add_entry_usage(entry, old_usage, entry_cache)
+                        continue
+                    patch = self._subtile_patch(data, subtile)
                     colors = [
                         (patch[i], patch[i + 1], patch[i + 2])
                         for i in range(0, len(patch), 4)
                         if patch[i + 3]
                     ]
-                    unique = list(dict.fromkeys(colors))
-                    if not unique or self._palette_exact_match(unique, allowed):
+                    if not colors:
                         continue
+                    unique = list(dict.fromkeys(colors))
                     preferred = (
-                        entries[subtile].palette
-                        if entries is not None
-                        and subtile < len(entries)
-                        and entries[subtile] is not None
+                        entry.palette
+                        if entry is not None and entry.palette in allowed
                         else None
                     )
-                    if preferred is not None and preferred in allowed:
-                        bank = preferred
-                    else:
-                        bank = self._choose_bank(unique, allowed)
-                    desired.setdefault(bank, Counter()).update(colors)
+                    bank = (
+                        preferred
+                        if preferred is not None
+                        else self._choose_bank(unique, allowed)
+                    )
+                    new_usage.setdefault(bank, Counter()).update(colors)
+
+        map_total = sum(sum(counts.values()) for counts in old_usage.values())
+        map_total += sum(sum(counts.values()) for counts in new_usage.values())
+        if map_total <= 0:
+            return
 
         palette_plans: list[tuple[int, object]] = []
         remap_plans: list[
@@ -3447,15 +3582,36 @@ class ImportMap:
                 dict[int, int],
             ]
         ] = []
-        for bank, colors in sorted(desired.items()):
+        for bank in sorted(set(old_usage) | set(new_usage)):
             old_palette = list(self.tilesets.palette_for(bank)[:16])
-            old_usage = self._bank_pixel_usage(bank)
+            existing = {old_palette[index] for index in range(1, 16)}
+            desired: Counter[tuple[int, int, int]] = Counter()
+            ignored = 0
+            for color, count in new_usage.get(bank, Counter()).items():
+                if color in existing:
+                    continue
+                if (
+                    self.palette_min_share > 0
+                    and count / map_total < self.palette_min_share
+                ):
+                    ignored += 1
+                    continue
+                desired[color] = count
+            if ignored:
+                self.result.ignored_palette_colors += ignored
+                self.result.warnings.append(
+                    f"Palette bank {bank}: ignored {ignored} new colour(s) below "
+                    f"{self.palette_min_share:.4%} of the map; they will use the "
+                    "nearest existing palette colour."
+                )
+            if not desired:
+                continue
             plan = plan_bank_colors(
                 self.tilesets,
                 bank,
-                colors,
+                desired,
                 self.palette_mode,
-                old_usage=old_usage,
+                old_usage=old_usage.get(bank, Counter()),
             )
             if not plan.replaced_slots:
                 continue
@@ -3566,7 +3722,36 @@ class ImportMap:
         groups, remaps = self.build_groups(changes)
         for group in groups:
             self.decide_group(group)
+        if self.tiny_edit_pixels:
+            tiny_changes = [
+                change
+                for group in groups
+                if group.action != "skip"
+                for change in group.changes
+                if 0 < change.changed_pixels <= self.tiny_edit_pixels
+            ]
+            if tiny_changes:
+                self.result.tiny_edits = len(tiny_changes)
+                labels = ", ".join(
+                    f"{change.label}({change.changed_pixels}px)"
+                    for change in tiny_changes[:12]
+                )
+                if len(tiny_changes) > 12:
+                    labels += f", ... (+{len(tiny_changes) - 12})"
+                message = (
+                    f"{len(tiny_changes)} tiny edit(s) would create or modify "
+                    f"metatile content: {labels}. If they were accidental, fix the "
+                    "layer PNG(s) and re-import."
+                )
+                if self.tiny_edit_policy == "error":
+                    raise MapEditorError(
+                        message
+                        + " The import was aborted to avoid creating unintended "
+                        "metatiles; use --tiny-edit-policy allow to override."
+                    )
+                if self.tiny_edit_policy == "warn":
+                    self.result.warnings.append(message)
         self._prepare_replace_plan(groups, remaps)
-        self._plan_edited_palettes(changes)
+        self._plan_edited_palettes(changes, groups)
         self.apply(groups, remaps)
         return self.result

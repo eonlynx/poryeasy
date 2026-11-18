@@ -60,6 +60,9 @@ Current defaults:
 - `--on-remove keep`
 - `--on-extra-animation-row skip`
 - `--palette-mode smart`
+- `--palette-min-share 0.5` (new colours below this percentage of the map are ignored)
+- `--tiny-edit-policy warn` (`warn`, `error`, or `allow`)
+- `--tiny-edit-pixels 4`
 - `--reuse-unused-metatiles` (on; disable with `--no-reuse-unused-metatiles`)
 
 Use `--dry-run` to validate without writing files.
@@ -88,6 +91,14 @@ map and tilesets in Porymap after importing.
   map, filling the lowest free slot first.
 - `smart` palette mode counts real tileset pixels, keeps at least one colour
   per hue family, and distributes the remaining slots by usage.
+- Palette influence now comes from the resulting map: unchanged cells carry the
+  old colours' weight and edited cells carry the new colours' weight. New
+  colours below `--palette-min-share` (default 0.5%) are ignored and mapped to
+  the nearest existing colour, so stray pixels cannot rewrite palettes.
+- Tiny edits of at most `--tiny-edit-pixels` pixels (default 4) are reported
+  with their map coordinates. Use `--tiny-edit-policy error` to abort instead
+  of importing them, or `allow` to suppress the warning. Tiny edits never
+  influence palettes.
 - Old tile indices are remapped to the closest colours in the new palettes.
 - Metatiles that share an overwritten tile receive that tile's replacement
   palette bank, including metatiles outside the imported map.

@@ -443,11 +443,47 @@ This is controlled by `--palette-mode`:
 | `nearest` | Does not rewrite palettes; maps each outside colour to the nearest existing colour. |
 | `error` | Refuses the edit. |
 
-Usage is measured across the full tileset artwork (all metatiles), not only the
-metatiles used by the current map. Only palette *colours* change; tile/metatile
-indices stay stable. Palette rewrites are backed up, affect every map sharing
-that palette bank, and are also available when editing animated metatiles and
-doors.
+Palette influence is measured from the resulting map: unchanged cells carry the
+old content's weight and edited cells carry the new content's weight. Only
+palette *colours* change; tile/metatile indices stay stable. Palette rewrites
+are backed up, affect every map sharing that palette bank, and are also
+available when editing animated metatiles and doors.
+
+Palette colours are weighted by how many pixels of the **resulting map** use
+them. Unchanged cells count as the old map; edited cells count as the new
+content. A colour that appears in more of the final map therefore has more
+influence than one used by a single new block. In addition, a new colour is only
+considered when it reaches `--palette-min-share` (default `0.5` percent of the
+map's opaque pixels). Colours below that threshold are not written to any
+palette; they are mapped to the closest existing colour instead.
+
+This is what prevents an accidental pixel from rewriting a palette: a single
+pixel, or a handful of pixels, is far below the default share. A deliberate
+full-map recolour still has enough weight to change the palette. Use
+`--palette-min-share 0` to disable the filter.
+
+### Tiny accidental edits
+
+A stray pixel can still create or modify a metatile even when it cannot change
+the palette. Poryeasy reports changes of at most `--tiny-edit-pixels` pixels
+(default `4`) with the block coordinates and pixel count:
+
+```text
+warning: 1 tiny edit(s) would create or modify metatile content: (12,7)(1px).
+If they were accidental, fix the layer PNG(s) and re-import.
+```
+
+To make this a hard stop before the map/tileset changes are written:
+
+```sh
+... import LittlerootTown --tiny-edit-policy error
+```
+
+Policies are `warn` (default), `error` (abort the import), and `allow` (do not
+warn). Tiny edits never influence palettes. If you correct the accidental pixel
+in the layer PNG and import again, the block matches its original metatile and
+is auto-remapped instead of creating a new one. For a non-interactive check,
+combine `--dry-run` with `--tiny-edit-policy error`.
 
 ## Tile limits and per-map tileset variants
 

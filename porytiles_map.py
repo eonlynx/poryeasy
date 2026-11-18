@@ -106,6 +106,9 @@ def cmd_import(args: argparse.Namespace) -> int:
         palette_mode=args.palette_mode,
         force_variant=args.force_variant,
         reuse_unused_metatiles=args.reuse_unused_metatiles,
+        palette_min_share=args.palette_min_share / 100.0,
+        tiny_edit_pixels=args.tiny_edit_pixels,
+        tiny_edit_policy=args.tiny_edit_policy,
     )
     result = importer.run()
 
@@ -142,6 +145,13 @@ def cmd_import(args: argparse.Namespace) -> int:
     print(f"  replaced metatiles:   {result.replaced_metatiles}")
     print(f"  added metatiles:      {result.added_metatiles}")
     print(f"  added tiles:          {result.added_tiles}")
+    if result.tiny_edits:
+        print(f"  tiny edits:           {result.tiny_edits}")
+    if result.ignored_palette_colors:
+        print(
+            f"  ignored new colours:  {result.ignored_palette_colors} "
+            "(below --palette-min-share)"
+        )
     if result.replace_units:
         print(
             f"  replace plan:         {result.replace_assigned}/{result.replace_units} "
@@ -452,6 +462,35 @@ def build_parser() -> argparse.ArgumentParser:
             "How to handle edited colours outside the active palettes: smart rewrites "
             "least-used slots (default), replace rewrites the whole affected palette, "
             "nearest maps to existing colours, error refuses"
+        ),
+    )
+    import_parser.add_argument(
+        "--palette-min-share",
+        type=float,
+        default=0.5,
+        metavar="PERCENT",
+        help=(
+            "Ignore new colours that appear in less than this percentage of the "
+            "resulting map's pixels (default: 0.5; use 0 to disable)"
+        ),
+    )
+    import_parser.add_argument(
+        "--tiny-edit-pixels",
+        type=int,
+        default=4,
+        metavar="N",
+        help=(
+            "Treat changes of at most N pixels as suspicious tiny edits "
+            "(default: 4; use 0 to disable)"
+        ),
+    )
+    import_parser.add_argument(
+        "--tiny-edit-policy",
+        choices=("warn", "error", "allow"),
+        default="warn",
+        help=(
+            "What to do with tiny edits that would create or modify metatiles: "
+            "warn and continue (default), abort the import, or allow silently"
         ),
     )
     import_parser.add_argument(

@@ -2345,6 +2345,144 @@ class PalettePolicyTests(unittest.TestCase):
                     opened.convert("RGBA").getpixel((48, 48)), (255, 0, 255, 255)
                 )
 
+    def test_tiny_off_palette_pixel_does_not_rewrite_palette(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ptmap-tiny-pixel-") as temp:
+            project = Path(temp) / "project"
+            make_synthetic_triple_project(project)
+            export_dir = Path(temp) / "export"
+            result = run_tool(
+                "export", "TestMap", "--output", str(export_dir), project=project
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            bottom = export_dir / "bottom.png"
+            with Image.open(bottom) as opened:
+                image = opened.convert("RGBA")
+            image.putpixel((48, 48), (255, 0, 255, 255))
+            image.save(bottom, format="PNG")
+            result = run_tool(
+                "import",
+                "TestMap",
+                "--input",
+                str(export_dir),
+                "--on-new",
+                "replace",
+                "--on-remove",
+                "keep",
+                project=project,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            self.assertIn("tiny edit", result.stdout.lower())
+            for path in (project / "data" / "tilesets").rglob("*.pal"):
+                self.assertNotIn("255 0 255", path.read_text(encoding="ascii"))
+
+    def test_tiny_edit_policy_error_aborts_import(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ptmap-tiny-error-") as temp:
+            project = Path(temp) / "project"
+            make_synthetic_triple_project(project)
+            export_dir = Path(temp) / "export"
+            result = run_tool(
+                "export", "TestMap", "--output", str(export_dir), project=project
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            bottom = export_dir / "bottom.png"
+            with Image.open(bottom) as opened:
+                image = opened.convert("RGBA")
+            image.putpixel((48, 48), (255, 0, 255, 255))
+            image.save(bottom, format="PNG")
+            result = run_tool(
+                "import",
+                "TestMap",
+                "--input",
+                str(export_dir),
+                "--on-new",
+                "replace",
+                "--on-remove",
+                "keep",
+                "--tiny-edit-policy",
+                "error",
+                project=project,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            combined = (result.stdout + result.stderr).lower()
+            self.assertIn("tiny edit", combined)
+            self.assertIn("aborted", combined)
+
+    def test_low_weight_new_colour_is_ignored_by_palette(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ptmap-palette-share-") as temp:
+            project = Path(temp) / "project"
+            make_synthetic_triple_project(project)
+            export_dir = Path(temp) / "export"
+            result = run_tool(
+                "export", "TestMap", "--output", str(export_dir), project=project
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            bottom = export_dir / "bottom.png"
+            with Image.open(bottom) as opened:
+                image = opened.convert("RGBA")
+            for y in range(48, 64):
+                for x in range(48, 64):
+                    image.putpixel((x, y), (255, 0, 255, 255))
+            image.save(bottom, format="PNG")
+            result = run_tool(
+                "import",
+                "TestMap",
+                "--input",
+                str(export_dir),
+                "--on-new",
+                "replace",
+                "--on-remove",
+                "keep",
+                "--palette-min-share",
+                "90",
+                project=project,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            self.assertIn("ignored", result.stdout.lower())
+            for path in (project / "data" / "tilesets").rglob("*.pal"):
+                self.assertNotIn("255 0 255", path.read_text(encoding="ascii"))
+
+    def test_palette_weight_keeps_dominant_colour_and_ignores_rare_one(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ptmap-palette-weight-") as temp:
+            project = Path(temp) / "project"
+            make_synthetic_triple_project(project)
+            export_dir = Path(temp) / "export"
+            result = run_tool(
+                "export", "TestMap", "--output", str(export_dir), project=project
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            bottom = export_dir / "bottom.png"
+            with Image.open(bottom) as opened:
+                image = opened.convert("RGBA")
+            for cell in ((0, 0), (1, 0), (2, 0), (3, 0)):
+                for y in range(cell[1] * 16, cell[1] * 16 + 16):
+                    for x in range(cell[0] * 16, cell[0] * 16 + 16):
+                        image.putpixel((x, y), (255, 0, 255, 255))
+            for y in range(16, 32):
+                for x in range(16):
+                    image.putpixel((x, y), (0, 255, 255, 255))
+            image.save(bottom, format="PNG")
+            result = run_tool(
+                "import",
+                "TestMap",
+                "--input",
+                str(export_dir),
+                "--on-new",
+                "replace",
+                "--on-remove",
+                "keep",
+                "--palette-min-share",
+                "20",
+                project=project,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            palette_text = "\n".join(
+                path.read_text(encoding="ascii")
+                for path in (project / "data" / "tilesets").rglob("*.pal")
+            )
+            self.assertIn("255 0 255", palette_text)
+            self.assertNotIn("0 255 255", palette_text)
+            self.assertIn("ignored", result.stdout.lower())
+
     def test_smart_palette_protects_last_colour_family(self) -> None:
         blue = [(20 + index * 15, 60, 180) for index in range(10)]
         green = (20, 180, 40)
