@@ -1127,6 +1127,57 @@ class SyntheticTripleLayerTests(unittest.TestCase):
                 updated_pair.metatile_signature(2), before_signature
             )
 
+    def test_replace_preserves_tiles_of_reserved_unused_metatiles(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ptmap-replace-reserved-") as temp:
+            project_root = Path(temp) / "project"
+            make_synthetic_triple_project(project_root)
+            layout_bin = project_root / "data/layouts/Test/map.bin"
+            blocks = read_u16(layout_bin)
+            # Metatile 2 (cell 1,0) becomes unused art, but it shares tile 1
+            # with metatile 1, which replace mode will free.
+            blocks[0 * 4 + 1] = 0
+            layout_bin.write_bytes(struct.pack(f"<{len(blocks)}H", *blocks))
+            project = Project(project_root)
+            target = project.resolve("TestMap")
+            pair = project.load_tileset_pair(target.layout)
+            before_tile = pair.primary.patterns[1]
+            before_signature = pair.metatile_signature(2)
+            export_dir = Path(temp) / "export"
+            result = run_tool(
+                "export", "TestMap", "--output", str(export_dir), project=project_root
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            bottom = export_dir / "bottom.png"
+            with Image.open(bottom) as opened:
+                image = opened.convert("RGBA")
+            for y in range(16, 32):
+                for x in range(16, 32):
+                    image.putpixel((x, y), (0, 0, 255, 255))
+            image.save(bottom, format="PNG")
+            result = run_tool(
+                "import",
+                "TestMap",
+                "--input",
+                str(export_dir),
+                "--on-new",
+                "replace",
+                "--on-remove",
+                "keep",
+                "--reuse-empty-metatiles-only",
+                project=project_root,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            self.assertRegex(
+                result.stdout, r"kept unused:\s+primary 1, secondary 0"
+            )
+            updated = Project(project_root)
+            updated_target = updated.resolve("TestMap")
+            updated_pair = updated.load_tileset_pair(updated_target.layout)
+            self.assertEqual(updated_pair.primary.patterns[1], before_tile)
+            self.assertEqual(
+                updated_pair.metatile_signature(2), before_signature
+            )
+
     def test_replace_keeps_metatile_used_by_border(self) -> None:
         with tempfile.TemporaryDirectory(prefix="ptmap-replace-border-") as temp:
             project_root = Path(temp) / "project"
