@@ -642,11 +642,22 @@ are fully transparent. Palettes use index 0 as the GBA transparency colour, so
 this checks the rendered pattern pixels rather than only whether the entry
 literally points at tile 0. Such slots are available without rewriting them.
 
-The feature is enabled by default. Disable it with:
+The feature is enabled by default. There are two ways to restrict it:
 
 ```sh
+# Keep zero-usage metatiles that still contain art; reuse only empty slots
+... import LittlerootTown --reuse-empty-metatiles-only
+
+# Disable the pre-import clearing/reuse policy entirely
 ... import LittlerootTown --no-reuse-unused-metatiles
 ```
+
+With `--reuse-empty-metatiles-only`, Poryeasy still scans for zero-usage slots,
+but only reuses those that are already fully transparent. Zero-usage metatiles
+that still contain visible art are reserved and left untouched, so the
+allocator cannot overwrite them. The summary reports them as `kept unused`.
+This is separate from replace mode: metatiles freed by the edited map can still
+be replaced.
 
 In replace mode, freed slots that receive no new content are left empty when
 this option is on, instead of being filled with duplicates of already-replaced

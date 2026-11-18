@@ -161,6 +161,8 @@ class ImportResult:
     cleared_tiles: int = 0
     cleared_unused_primary: int = 0
     cleared_unused_secondary: int = 0
+    kept_unused_primary: int = 0
+    kept_unused_secondary: int = 0
     left_empty_replace_slots: int = 0
     tiny_edits: int = 0
     ignored_palette_colors: int = 0
@@ -263,6 +265,7 @@ class ImportMap:
         palette_mode: str = "smart",
         force_variant: str | None = None,
         reuse_unused_metatiles: bool = True,
+        empty_metatiles_only: bool = False,
         palette_min_share: float = 0.005,
         tiny_edit_pixels: int = 4,
         tiny_edit_policy: str = "warn",
@@ -293,6 +296,7 @@ class ImportMap:
         self.palette_mode = palette_mode
         self.force_variant = force_variant
         self.reuse_unused_metatiles = reuse_unused_metatiles
+        self.empty_metatiles_only = empty_metatiles_only
         self.palette_min_share = max(0.0, palette_min_share)
         self.tiny_edit_pixels = max(0, tiny_edit_pixels)
         self.tiny_edit_policy = tiny_edit_policy
@@ -2950,6 +2954,43 @@ class ImportMap:
         counts, incomplete, incomplete_layouts = self._targeted_reference_counts(
             all_ids
         )
+        if self.empty_metatiles_only:
+            for tileset, ids in pairs:
+                if ids & incomplete:
+                    layouts = sorted(
+                        {
+                            layout
+                            for metatile_id in ids & incomplete
+                            for layout in incomplete_layouts.get(metatile_id, set())
+                        }
+                    )
+                    self.result.warnings.append(
+                        f"Cannot reuse empty metatiles in {tileset.name}: unreadable "
+                        f"layout(s): {', '.join(layouts[:8])}; skipped."
+                    )
+                    continue
+                kept: list[int] = []
+                for local, metatile in enumerate(tileset.metatiles):
+                    metatile_id = tileset.global_metatile_base + local
+                    if counts.get(metatile_id, 0) != 0:
+                        continue
+                    if self._metatile_is_visually_empty(metatile):
+                        continue
+                    # Keep unused art available for other maps/tools; the
+                    # allocator will only consider unreserved empty slots.
+                    tileset._reserved_metatiles.add(local)
+                    kept.append(local)
+                if not kept:
+                    continue
+                if tileset.kind == "primary":
+                    self.result.kept_unused_primary += len(kept)
+                else:
+                    self.result.kept_unused_secondary += len(kept)
+                self.result.warnings.append(
+                    f"Kept {len(kept)} zero-usage metatile slot(s) with content in "
+                    f"{tileset.name}; only already-empty slots will be reused."
+                )
+            return
         plans: list[tuple[Tileset, list[int]]] = []
         for tileset, ids in pairs:
             if ids & incomplete:

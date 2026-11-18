@@ -106,6 +106,7 @@ def cmd_import(args: argparse.Namespace) -> int:
         palette_mode=args.palette_mode,
         force_variant=args.force_variant,
         reuse_unused_metatiles=args.reuse_unused_metatiles,
+        empty_metatiles_only=args.empty_metatiles_only,
         palette_min_share=args.palette_min_share / 100.0,
         tiny_edit_pixels=args.tiny_edit_pixels,
         tiny_edit_policy=args.tiny_edit_policy,
@@ -189,6 +190,11 @@ def cmd_import(args: argparse.Namespace) -> int:
         print(
             f"  cleared unused:       primary {result.cleared_unused_primary}, "
             f"secondary {result.cleared_unused_secondary}"
+        )
+    if result.kept_unused_primary or result.kept_unused_secondary:
+        print(
+            f"  kept unused:          primary {result.kept_unused_primary}, "
+            f"secondary {result.kept_unused_secondary} (content preserved)"
         )
     if result.left_empty_replace_slots:
         print(f"  empty freed slots:    {result.left_empty_replace_slots}")
@@ -510,13 +516,23 @@ def build_parser() -> argparse.ArgumentParser:
             "disable fuzzy tile matching)"
         ),
     )
-    import_parser.add_argument(
+    reuse_group = import_parser.add_mutually_exclusive_group()
+    reuse_group.add_argument(
         "--no-reuse-unused-metatiles",
         dest="reuse_unused_metatiles",
         action="store_false",
         help=(
-            "Do not clear metatile slots with zero usages across every map before "
-            "importing (default: clear them and reuse them for new content)"
+            "Do not clear or reuse metatile slots with zero usages across every map "
+            "before importing (default: clear them and reuse them for new content)"
+        ),
+    )
+    reuse_group.add_argument(
+        "--reuse-empty-metatiles-only",
+        dest="empty_metatiles_only",
+        action="store_true",
+        help=(
+            "Reuse only already-empty metatile slots; keep unused metatiles that "
+            "still contain art intact"
         ),
     )
     import_parser.add_argument(

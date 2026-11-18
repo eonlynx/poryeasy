@@ -65,6 +65,7 @@ Current defaults:
 - `--tiny-edit-pixels 4`
 - `--tile-match-tolerance 1` (tiny edits use the larger tiny-edit threshold)
 - `--reuse-unused-metatiles` (on; disable with `--no-reuse-unused-metatiles`)
+- `--reuse-empty-metatiles-only` (reuse only already-empty slots; keep zero-usage art)
 
 Use `--dry-run` to validate without writing files.
 
@@ -85,6 +86,9 @@ map and tilesets in Porymap after importing.
   are cleared and reused first. Slots that are already fully transparent are
   free without being rewritten. Disable this with
   `--no-reuse-unused-metatiles`.
+- `--reuse-empty-metatiles-only` preserves zero-usage metatiles that still
+  contain visible art and only reuses already-empty slots; kept slots are
+  reported as `kept unused`.
 - If replace mode has fewer new contents than freed slots, the remaining slots
   stay empty instead of being filled with duplicates. Slots still used by other
   maps are kept intact.
