@@ -869,6 +869,137 @@ class SyntheticTripleLayerTests(unittest.TestCase):
             )
             self.assertEqual(attributes[-1] & 0xFF, 1)
 
+    def test_tiny_edit_reuses_existing_tile(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ptmap-fuzzy-tile-") as temp:
+            project = Path(temp) / "project"
+            make_synthetic_triple_project(project)
+            export_dir = Path(temp) / "export"
+            result = run_tool(
+                "export", "TestMap", "--output", str(export_dir), project=project
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            bottom = export_dir / "bottom.png"
+            with Image.open(bottom) as opened:
+                image = opened.convert("RGBA")
+            image.putpixel((16, 0), (0, 255, 0, 255))
+            image.save(bottom, format="PNG")
+            result = run_tool(
+                "import",
+                "TestMap",
+                "--input",
+                str(export_dir),
+                "--on-new",
+                "replace",
+                "--on-remove",
+                "keep",
+                project=project,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            self.assertRegex(result.stdout, r"added tiles:\s+0")
+            self.assertRegex(result.stdout, r"reused near tiles:\s+[1-9]")
+
+    def test_tile_match_tolerance_can_be_disabled(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ptmap-fuzzy-off-") as temp:
+            project = Path(temp) / "project"
+            make_synthetic_triple_project(project)
+            export_dir = Path(temp) / "export"
+            result = run_tool(
+                "export", "TestMap", "--output", str(export_dir), project=project
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            bottom = export_dir / "bottom.png"
+            with Image.open(bottom) as opened:
+                image = opened.convert("RGBA")
+            image.putpixel((16, 0), (0, 255, 0, 255))
+            image.save(bottom, format="PNG")
+            result = run_tool(
+                "import",
+                "TestMap",
+                "--input",
+                str(export_dir),
+                "--on-new",
+                "replace",
+                "--on-remove",
+                "keep",
+                "--tile-match-tolerance",
+                "0",
+                project=project,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            self.assertRegex(result.stdout, r"added tiles:\s+[1-9]")
+            self.assertNotIn("reused near tiles:", result.stdout)
+
+    def test_two_pixel_edit_uses_tiny_tolerance(self) -> None:
+        def run_case(tolerance: str) -> subprocess.CompletedProcess:
+            with tempfile.TemporaryDirectory(prefix="ptmap-fuzzy-two-") as temp:
+                project = Path(temp) / "project"
+                make_synthetic_triple_project(project)
+                export_dir = Path(temp) / "export"
+                result = run_tool(
+                    "export", "TestMap", "--output", str(export_dir), project=project
+                )
+                self.assertEqual(
+                    result.returncode, 0, result.stderr + result.stdout
+                )
+                bottom = export_dir / "bottom.png"
+                with Image.open(bottom) as opened:
+                    image = opened.convert("RGBA")
+                image.putpixel((16, 0), (0, 255, 0, 255))
+                image.putpixel((17, 0), (0, 255, 0, 255))
+                image.save(bottom, format="PNG")
+                return run_tool(
+                    "import",
+                    "TestMap",
+                    "--input",
+                    str(export_dir),
+                    "--on-new",
+                    "replace",
+                    "--on-remove",
+                    "keep",
+                    "--tile-match-tolerance",
+                    tolerance,
+                    project=project,
+                )
+
+        default = run_case("1")
+        self.assertEqual(default.returncode, 0, default.stderr + default.stdout)
+        self.assertRegex(default.stdout, r"added tiles:\s+0")
+        self.assertRegex(default.stdout, r"reused near tiles:\s+[1-9]")
+        disabled = run_case("0")
+        self.assertEqual(disabled.returncode, 0, disabled.stderr + disabled.stdout)
+        self.assertRegex(disabled.stdout, r"added tiles:\s+[1-9]")
+        self.assertNotIn("reused near tiles:", disabled.stdout)
+
+    def test_tiny_off_palette_pixel_ignores_quantize_error(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ptmap-fuzzy-colour-") as temp:
+            project = Path(temp) / "project"
+            make_synthetic_triple_project(project)
+            export_dir = Path(temp) / "export"
+            result = run_tool(
+                "export", "TestMap", "--output", str(export_dir), project=project
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            bottom = export_dir / "bottom.png"
+            with Image.open(bottom) as opened:
+                image = opened.convert("RGBA")
+            image.putpixel((48, 48), (255, 0, 255, 255))
+            image.save(bottom, format="PNG")
+            result = run_tool(
+                "import",
+                "TestMap",
+                "--input",
+                str(export_dir),
+                "--on-new",
+                "replace",
+                "--on-remove",
+                "keep",
+                "--quantize",
+                "error",
+                project=project,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            self.assertRegex(result.stdout, r"added tiles:\s+0")
+
     def test_visual_empty_uses_transparency_not_entry_zero(self) -> None:
         with tempfile.TemporaryDirectory(prefix="ptmap-transparent-") as temp:
             project_root = Path(temp) / "project"

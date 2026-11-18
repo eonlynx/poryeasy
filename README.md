@@ -485,6 +485,27 @@ in the layer PNG and import again, the block matches its original metatile and
 is auto-remapped instead of creating a new one. For a non-interactive check,
 combine `--dry-run` with `--tiny-edit-policy error`.
 
+### Reusing near-identical 8x8 tiles
+
+Edited 8x8 tiles are matched against the existing tile pool with a small pixel
+tolerance. If a changed tile is close enough to an existing tile, Poryeasy
+reuses that tile instead of allocating a new compiled tile. The original tile
+of the edited subtile is checked first; horizontal/vertical flips are also
+considered.
+
+- `--tile-match-tolerance N` (default `1`) applies to normal edits. Use `0` to
+  disable fuzzy matching completely.
+- Tiny edits up to `--tiny-edit-pixels` (default `4`) automatically use the
+  larger tiny-edit threshold, so a one-to-four-pixel accidental change reuses
+  the previous tile.
+- The reused tile is reported in the summary (`reused near tiles`), and the
+  validation accepts the small difference as a harmonization instead of
+  failing.
+
+A tiny edit can still create or replace a metatile, but that metatile is built
+from existing tiles: no new 8x8 tile is compiled. If the harmonized metatile
+matches an existing one, the map cell is remapped to it directly.
+
 ## Tile limits and per-map tileset variants
 
 GBA tilesets have a hard tile limit (normally 512 primary and 512 secondary

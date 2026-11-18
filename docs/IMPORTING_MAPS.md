@@ -63,6 +63,7 @@ Current defaults:
 - `--palette-min-share 0.5` (new colours below this percentage of the map are ignored)
 - `--tiny-edit-policy warn` (`warn`, `error`, or `allow`)
 - `--tiny-edit-pixels 4`
+- `--tile-match-tolerance 1` (tiny edits use the larger tiny-edit threshold)
 - `--reuse-unused-metatiles` (on; disable with `--no-reuse-unused-metatiles`)
 
 Use `--dry-run` to validate without writing files.
@@ -99,6 +100,11 @@ map and tilesets in Porymap after importing.
   with their map coordinates. Use `--tiny-edit-policy error` to abort instead
   of importing them, or `allow` to suppress the warning. Tiny edits never
   influence palettes.
+- Edited 8x8 tiles are matched against existing tiles with a small tolerance:
+  `--tile-match-tolerance` (default 1) for normal edits, and
+  `--tiny-edit-pixels` for tiny edits. A near-identical tile is reused instead
+  of compiling a new one; validation accepts the harmonized difference. Use
+  `--tile-match-tolerance 0` to disable fuzzy tile matching.
 - Old tile indices are remapped to the closest colours in the new palettes.
 - Metatiles that share an overwritten tile receive that tile's replacement
   palette bank, including metatiles outside the imported map.

@@ -99,6 +99,7 @@ class Change:
     animated_state_remap: bool = False
     remap_target_id: int | None = None
     changed_pixels: int = 0
+    fuzzy_tiles: int = 0
 
     @property
     def label(self) -> str:
@@ -163,6 +164,8 @@ class ImportResult:
     left_empty_replace_slots: int = 0
     tiny_edits: int = 0
     ignored_palette_colors: int = 0
+    reused_tiles: int = 0
+    max_reused_difference: int = 0
     backup_dir: Path | None = None
     written: list[Path] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
@@ -263,6 +266,7 @@ class ImportMap:
         palette_min_share: float = 0.005,
         tiny_edit_pixels: int = 4,
         tiny_edit_policy: str = "warn",
+        tile_match_tolerance: int = 1,
     ) -> None:
         self.project = project
         self.target = target
@@ -292,6 +296,8 @@ class ImportMap:
         self.palette_min_share = max(0.0, palette_min_share)
         self.tiny_edit_pixels = max(0, tiny_edit_pixels)
         self.tiny_edit_policy = tiny_edit_policy
+        self.tile_match_tolerance = max(0, tile_match_tolerance)
+        self.tilesets.tile_match_tolerance = self.tile_match_tolerance
         self._metatiles_cleared = False
         self._sheet_cell_index: dict[bytes, list[int]] = {}
         self._change_allowed_banks: dict[int, range] = {}
@@ -597,6 +603,20 @@ class ImportMap:
         y = (subtile // 2) * TILE_SIZE
         return patch_from_rgba(patch, METATILE_SIZE, x, y, TILE_SIZE)
 
+    def _quantize_mode_for(self, change: Change) -> str:
+        """Tiny edits are harmonized to the nearest colour and never fail."""
+        if self.tiny_edit_pixels and change.changed_pixels <= self.tiny_edit_pixels:
+            return "nearest"
+        return self.quantize
+
+    def _tile_tolerance_for(self, change: Change) -> int:
+        """Tiny edits may reuse a nearby tile up to the tiny-edit threshold."""
+        if self.tile_match_tolerance <= 0:
+            return 0
+        if self.tiny_edit_pixels and change.changed_pixels <= self.tiny_edit_pixels:
+            return max(self.tile_match_tolerance, self.tiny_edit_pixels)
+        return self.tile_match_tolerance
+
     def analyze(self, change: Change, scope: str) -> Analysis:
         analysis = Analysis()
         seen_new: set[tuple[bytes, int]] = set()
@@ -634,7 +654,8 @@ class ImportMap:
                         scope=scope,
                         preferred_palette=original_entry.palette,
                         preferred_tile=original_entry.tile_index,
-                        quantize=self.quantize,
+                        quantize=self._quantize_mode_for(change),
+                        tolerance=self._tile_tolerance_for(change),
                     )
                     if not exact or substitutions:
                         analysis.inexact = True
@@ -766,7 +787,9 @@ class ImportMap:
             self.scope = scope
             self.allocated: dict[tuple[bytes, int], int] = {}
 
-        def get(self, need: NeedsNewTile, preferred_tile: int | None) -> int:
+        def get(
+            self, need: NeedsNewTile, preferred_tile: int | None, tolerance: int
+        ) -> int:
             key = (need.pattern, need.palette)
             if key in self.allocated:
                 return self.allocated[key]
@@ -774,9 +797,17 @@ class ImportMap:
             allowed = range(self.importer.project.settings.num_tiles_in_primary)
             if self.scope != "primary":
                 allowed = range(self.importer.project.settings.num_tiles_total)
-            found = pair._find_existing_tile(need.pattern, allowed, preferred_tile)
+            found = pair._find_existing_tile(
+                need.pattern, allowed, preferred_tile, tolerance=tolerance
+            )
             if found is not None:
                 tile_index = found[0]
+                if pair.last_match_was_fuzzy:
+                    self.importer.result.reused_tiles += 1
+                    self.importer.result.max_reused_difference = max(
+                        self.importer.result.max_reused_difference,
+                        pair.last_match_difference,
+                    )
             else:
                 tile_index = pair.allocate_tile_for_scope(need.pattern, self.scope)
                 self.importer.result.added_tiles += 1
@@ -822,15 +853,34 @@ class ImportMap:
                         scope=scope,
                         preferred_palette=original_entry.palette,
                         preferred_tile=original_entry.tile_index,
-                        quantize=self.quantize,
+                        quantize=self._quantize_mode_for(change),
+                        tolerance=self._tile_tolerance_for(change),
                     )
                     if not exact:
                         substitutions += 1
+                    if self.tilesets.last_match_was_fuzzy:
+                        self.result.reused_tiles += 1
+                        self.result.max_reused_difference = max(
+                            self.result.max_reused_difference,
+                            self.tilesets.last_match_difference,
+                        )
+                        change.fuzzy_tiles += 1
                     layer_entries.append(entry)
                 except NeedsNewTile as need:
                     if not need.exact:
                         substitutions += 1
-                    tile_index = allocator.get(need, original_entry.tile_index)
+                    tile_index = allocator.get(
+                        need,
+                        original_entry.tile_index,
+                        self._tile_tolerance_for(change),
+                    )
+                    if self.tilesets.last_match_was_fuzzy:
+                        self.result.reused_tiles += 1
+                        self.result.max_reused_difference = max(
+                            self.result.max_reused_difference,
+                            self.tilesets.last_match_difference,
+                        )
+                        change.fuzzy_tiles += 1
                     layer_entries.append(
                         TileRef(tile_index, need.palette, False, False)
                     )
@@ -1539,6 +1589,18 @@ class ImportMap:
                 self.allowed_palettes = range(importer.project.settings.num_pals_total)
             self.preferred_tiles = importer._unit_preferred_tiles(unit)
             self.used_tiles: set[int] = set()
+            self.tile_tolerance = importer.tile_match_tolerance
+            if self.tile_tolerance > 0 and (
+                importer.tiny_edit_pixels
+                and unit.changes
+                and all(
+                    change.changed_pixels <= importer.tiny_edit_pixels
+                    for change in unit.changes
+                )
+            ):
+                self.tile_tolerance = max(
+                    self.tile_tolerance, importer.tiny_edit_pixels
+                )
 
         def get(self, pattern: bytes, palette: int, patch: bytes) -> TileRef:
             importer = self.importer
@@ -1550,11 +1612,21 @@ class ImportMap:
                     )
                 return TileRef(0, 0, False, False)
             found = importer._find_replace_tile(
-                pattern, self.scope, self.preferred_tiles, self.used_tiles
+                pattern,
+                self.scope,
+                self.preferred_tiles,
+                self.used_tiles,
+                self.tile_tolerance,
             )
             if found is not None:
                 tile_index, hflip, vflip = found
                 self.used_tiles.add(tile_index)
+                if importer.tilesets.last_match_was_fuzzy:
+                    importer.result.reused_tiles += 1
+                    importer.result.max_reused_difference = max(
+                        importer.result.max_reused_difference,
+                        importer.tilesets.last_match_difference,
+                    )
                 return TileRef(tile_index, palette, hflip, vflip)
             tile_index = importer._allocate_replace_tile(
                 pattern, self.scope, self.preferred_tiles, palette
@@ -1568,6 +1640,7 @@ class ImportMap:
         scope: str,
         preferred_tiles: set[int],
         used_tiles: set[int],
+        tolerance: int,
     ) -> tuple[int, bool, bool] | None:
         allowed = (
             range(self.project.settings.num_tiles_in_primary)
@@ -1575,6 +1648,8 @@ class ImportMap:
             else range(self.project.settings.num_tiles_total)
         )
         animated = self.tilesets.animated_tile_indices()
+        self.tilesets.last_match_was_fuzzy = False
+        self.tilesets.last_match_difference = 0
         candidates: list[tuple[int, bool, bool]] = []
         for tileset in (self.tilesets.primary, self.tilesets.secondary):
             for tile_index, hflip, vflip in tileset._build_tile_matcher().get(
@@ -1584,6 +1659,19 @@ class ImportMap:
                     continue
                 candidates.append((tile_index, hflip, vflip))
         if not candidates:
+            if tolerance > 0:
+                near = self.tilesets._find_near_tile(
+                    pattern,
+                    allowed,
+                    None,
+                    tolerance,
+                    preferred_tiles=preferred_tiles,
+                )
+                if near is not None:
+                    tile_index, hflip, vflip, difference = near
+                    self.tilesets.last_match_was_fuzzy = True
+                    self.tilesets.last_match_difference = difference
+                    return tile_index, hflip, vflip
             return None
 
         def score(
@@ -1716,6 +1804,12 @@ class ImportMap:
             TileRef(0, 0, False, False)
             for _ in range(self.tilesets.entries_per_metatile)
         ]
+        quantize = self.quantize
+        if self.tiny_edit_pixels and unit.changes and all(
+            change.changed_pixels <= self.tiny_edit_pixels for change in unit.changes
+        ):
+            quantize = "nearest"
+        fuzzy_count = 0
         per_layer: list[list[TileRef] | None] = [None, None, None]
         substitutions = 0
         for layer in range(3):
@@ -1747,19 +1841,27 @@ class ImportMap:
                     patch,
                     allowed_palettes=list(allocator.allowed_palettes),
                     preferred_palette=preferred_palette,
-                    mode=self.quantize,
+                    mode=quantize,
                     palette_bank=self.tilesets.palette_bank(),
                 )
                 if not exact:
                     substitutions += 1
                 entry = allocator.get(pattern, palette, patch)
-                if not self._entry_alpha_matches(entry, patch):
+                if self.tilesets.last_match_was_fuzzy:
+                    fuzzy_count += 1
+                if (
+                    not self.tilesets.last_match_was_fuzzy
+                    and not self._entry_alpha_matches(entry, patch)
+                ):
                     raise MapEditorError(
                         f"Replace mode produced an invalid alpha mask for "
                         f"{unit.changes[0].label if unit.changes else 'a duplicate slot'}."
                     )
                 layer_entries.append(entry)
             per_layer[layer] = layer_entries
+        if fuzzy_count:
+            for change in unit.changes:
+                change.fuzzy_tiles += fuzzy_count
         return self.tilesets.build_raw_entries(zeros, per_layer), substitutions
 
     @staticmethod
@@ -2604,6 +2706,17 @@ class ImportMap:
                                     continue
                                 if final_sub != desired_sub:
                                     diff = visualize_diff(final_sub, desired_sub)
+                                    if (
+                                        edited.fuzzy_tiles
+                                        and diff
+                                        <= self._tile_tolerance_for(edited)
+                                    ):
+                                        self.result.warnings.append(
+                                            f"{edited.label} {LAYER_NAMES[layer]}: "
+                                            f"{diff} pixel(s) were harmonized to a nearby "
+                                            "existing 8x8 tile."
+                                        )
+                                        continue
                                     raise MapEditorError(
                                         f"Internal validation failed at {edited.label}, layer "
                                         f"{LAYER_NAMES[layer]} (edited 8x8 cell, {diff} pixels differ). "
@@ -2618,6 +2731,16 @@ class ImportMap:
                             continue
                         if final_patches[layer] != desired:
                             diff = visualize_diff(final_patches[layer], desired)
+                            if edited.fuzzy_tiles and diff <= (
+                                self._tile_tolerance_for(edited)
+                                * max(1, edited.fuzzy_tiles)
+                            ):
+                                self.result.warnings.append(
+                                    f"{edited.label} {LAYER_NAMES[layer]}: {diff} "
+                                    "pixel(s) were harmonized to nearby existing "
+                                    "8x8 tile(s)."
+                                )
+                                continue
                             if analysis.exact and not (
                                 self.result.palette_changed
                                 or self.tilesets.palette_rewrites

@@ -836,6 +836,9 @@ class TilesetPair:
         self._animated_index_cache: set[int] | None = None
         self.palette_mode = "smart"
         self.palette_rewrites = []
+        self.tile_match_tolerance = 0
+        self.last_match_was_fuzzy = False
+        self.last_match_difference = 0
 
     @property
     def entries_per_metatile(self) -> int:
@@ -1020,6 +1023,7 @@ class TilesetPair:
         preferred_palette: int | None = None,
         preferred_tile: int | None = None,
         quantize: str = "nearest",
+        tolerance: int | None = None,
     ) -> tuple[
         TileRef,
         bool,
@@ -1052,7 +1056,9 @@ class TilesetPair:
             palette_bank=self.palette_bank(),
         )
 
-        result = self._find_existing_tile(pattern, allowed_tiles, preferred_tile)
+        result = self._find_existing_tile(
+            pattern, allowed_tiles, preferred_tile, tolerance=tolerance
+        )
         if result is not None:
             tile_index, hflip, vflip = result
             return (
@@ -1065,8 +1071,18 @@ class TilesetPair:
         raise NeedsNewTile(pattern, palette, exact, substitutions)
 
     def _find_existing_tile(
-        self, pattern: bytes, allowed_tiles: range, preferred_tile: int | None
+        self,
+        pattern: bytes,
+        allowed_tiles: range,
+        preferred_tile: int | None,
+        *,
+        tolerance: int | None = None,
     ) -> tuple[int, bool, bool] | None:
+        self.last_match_was_fuzzy = False
+        self.last_match_difference = 0
+        effective_tolerance = (
+            self.tile_match_tolerance if tolerance is None else max(0, tolerance)
+        )
         candidates: list[tuple[int, bool, bool]] = []
         for tileset in (self.primary, self.secondary):
             for global_index, hflip, vflip in tileset._build_tile_matcher().get(
@@ -1074,24 +1090,130 @@ class TilesetPair:
             ):
                 if global_index in allowed_tiles:
                     candidates.append((global_index, hflip, vflip))
-        if not candidates:
-            return None
+        if candidates:
+            animated = self.animated_tile_indices()
 
+            def score(candidate: tuple[int, bool, bool]) -> tuple[int, int, int, int]:
+                global_index, hflip, vflip = candidate
+                return (
+                    int(hflip) + int(vflip),
+                    0 if global_index in animated else 1,
+                    0
+                    if preferred_tile is not None and global_index == preferred_tile
+                    else 1,
+                    0 if global_index < self.project.settings.num_tiles_in_primary else 1,
+                    global_index,
+                )
+
+            return min(candidates, key=score)
+
+        if effective_tolerance > 0:
+            near = self._find_near_tile(
+                pattern,
+                allowed_tiles,
+                preferred_tile,
+                effective_tolerance,
+            )
+            if near is not None:
+                tile_index, hflip, vflip, difference = near
+                self.last_match_was_fuzzy = True
+                self.last_match_difference = difference
+                return tile_index, hflip, vflip
+        return None
+
+    @staticmethod
+    def _pattern_difference(a: bytes, b: bytes, limit: int) -> int:
+        difference = 0
+        for left, right in zip(a, b):
+            if left != right:
+                difference += 1
+                if difference > limit:
+                    break
+        return difference
+
+    def _find_near_tile(
+        self,
+        pattern: bytes,
+        allowed_tiles: range,
+        preferred_tile: int | None,
+        tolerance: int,
+        *,
+        preferred_tiles: set[int] | None = None,
+    ) -> tuple[int, bool, bool, int] | None:
+        """Finds an existing tile within ``tolerance`` differing pixels."""
+        if tolerance <= 0:
+            return None
         animated = self.animated_tile_indices()
 
-        def score(candidate: tuple[int, bool, bool]) -> tuple[int, int, int, int]:
-            global_index, hflip, vflip = candidate
-            return (
-                int(hflip) + int(vflip),
-                0 if global_index in animated else 1,
-                0
-                if preferred_tile is not None and global_index == preferred_tile
-                else 1,
-                0 if global_index < self.project.settings.num_tiles_in_primary else 1,
-                global_index,
-            )
+        def best_orientation(candidate: bytes) -> tuple[int, int, bool, bool] | None:
+            best: tuple[int, int, bool, bool] | None = None
+            for hflip in (False, True):
+                for vflip in (False, True):
+                    oriented = (
+                        candidate
+                        if not hflip and not vflip
+                        else flip_pattern(candidate, hflip, vflip)
+                    )
+                    difference = self._pattern_difference(pattern, oriented, tolerance)
+                    if difference > tolerance:
+                        continue
+                    score = (difference, int(hflip) + int(vflip))
+                    if best is None or score < (best[0], best[1]):
+                        best = (difference, int(hflip) + int(vflip), hflip, vflip)
+            return best
 
-        return min(candidates, key=score)
+        def tile_for(global_index: int) -> bytes | None:
+            if global_index not in allowed_tiles:
+                return None
+            owner = self.tileset_for_tile(global_index)
+            local = global_index - owner.global_tile_base
+            if not 0 <= local < len(owner.patterns):
+                return None
+            return owner.patterns[local]
+
+        # The tile that the edited subtile replaced is the most likely match.
+        preferred_order: list[int] = []
+        if preferred_tile is not None:
+            preferred_order.append(preferred_tile)
+        if preferred_tiles:
+            preferred_order.extend(
+                tile for tile in sorted(preferred_tiles) if tile != preferred_tile
+            )
+        for global_index in preferred_order:
+            candidate = tile_for(global_index)
+            if candidate is None:
+                continue
+            best = best_orientation(candidate)
+            if best is not None:
+                difference, _flips, hflip, vflip = best
+                return global_index, hflip, vflip, difference
+
+        best_candidate: tuple[
+            tuple[int, int, int, int, int, int], int, bool, bool, int
+        ] | None = None
+        for tileset in (self.primary, self.secondary):
+            for local, candidate in enumerate(tileset.patterns):
+                global_index = tileset.global_tile_base + local
+                if global_index not in allowed_tiles:
+                    continue
+                best = best_orientation(candidate)
+                if best is None:
+                    continue
+                difference, flips, hflip, vflip = best
+                score = (
+                    difference,
+                    flips,
+                    0 if global_index not in animated else 1,
+                    0 if preferred_tile == global_index else 1,
+                    0 if global_index < self.project.settings.num_tiles_in_primary else 1,
+                    global_index,
+                )
+                if best_candidate is None or score < best_candidate[0]:
+                    best_candidate = (score, global_index, hflip, vflip, difference)
+        if best_candidate is None:
+            return None
+        _score, global_index, hflip, vflip, difference = best_candidate
+        return global_index, hflip, vflip, difference
 
     def allocate_tile_for_scope(self, pattern: bytes, scope: str) -> int:
         if scope == "primary":

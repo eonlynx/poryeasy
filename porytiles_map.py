@@ -109,6 +109,7 @@ def cmd_import(args: argparse.Namespace) -> int:
         palette_min_share=args.palette_min_share / 100.0,
         tiny_edit_pixels=args.tiny_edit_pixels,
         tiny_edit_policy=args.tiny_edit_policy,
+        tile_match_tolerance=args.tile_match_tolerance,
     )
     result = importer.run()
 
@@ -145,6 +146,11 @@ def cmd_import(args: argparse.Namespace) -> int:
     print(f"  replaced metatiles:   {result.replaced_metatiles}")
     print(f"  added metatiles:      {result.added_metatiles}")
     print(f"  added tiles:          {result.added_tiles}")
+    if result.reused_tiles:
+        print(
+            f"  reused near tiles:    {result.reused_tiles} "
+            f"(up to {result.max_reused_difference} px difference)"
+        )
     if result.tiny_edits:
         print(f"  tiny edits:           {result.tiny_edits}")
     if result.ignored_palette_colors:
@@ -491,6 +497,17 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "What to do with tiny edits that would create or modify metatiles: "
             "warn and continue (default), abort the import, or allow silently"
+        ),
+    )
+    import_parser.add_argument(
+        "--tile-match-tolerance",
+        type=int,
+        default=1,
+        metavar="N",
+        help=(
+            "Reuse an existing 8x8 tile when the edited tile differs by at most N "
+            "pixels (default: 1; tiny edits use --tiny-edit-pixels; use 0 to "
+            "disable fuzzy tile matching)"
         ),
     )
     import_parser.add_argument(
