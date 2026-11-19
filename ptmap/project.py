@@ -155,6 +155,9 @@ class Project:
         self.layouts = self._load_layouts()
         self._maps: list[MapEntry] | None = None
         self._tileset_cache: dict[tuple[str, str], object] = {}
+        self._tileset_asset_dir_cache: dict[
+            tuple[str, str], tuple[Path, Path]
+        ] = {}
         self._global_tile_usage_cache: dict[str, set[int]] = {}
         self._metatile_usage_cache: dict[tuple[str, str], set[int]] | None = None
         self._metatile_ref_counts_cache: dict[int, int] | None = None
@@ -369,43 +372,133 @@ class Project:
         base = re.sub(r"(?<=[A-Z])(?=[A-Z][a-z])", "_", base)
         return base.lower()
 
-    def tileset_dir(self, tileset_name: str, kind: str) -> Path:
+    def tileset_dir(
+        self, tileset_name: str, kind: str, version: str | None = None
+    ) -> Path:
         root = self._tileset_root(kind)
-        candidate = root / self.tileset_folder_name(tileset_name)
-        if candidate.is_dir():
-            return candidate
+        folder = self.tileset_folder_name(tileset_name)
+        candidates = []
+        if version == "frlg":
+            candidates.append(folder + "_frlg")
+        candidates.append(folder)
+        candidates.append(folder + "_frlg")
+        for name in dict.fromkeys(candidates):
+            candidate = root / name
+            if candidate.is_dir():
+                return candidate
 
         def norm(value: str) -> str:
             return re.sub(r"[^a-z0-9]", "", value.lower())
 
-        wanted = norm(tileset_name)
-        matches = [
-            path
-            for path in root.iterdir()
-            if path.is_dir()
-            and norm(path.name) == norm(self.tileset_folder_name(tileset_name))
-        ]
-        if not matches:
+        for name in dict.fromkeys(candidates):
+            wanted = norm(name)
             matches = [
                 path
                 for path in root.iterdir()
                 if path.is_dir() and norm(path.name) == wanted
             ]
+            if len(matches) == 1:
+                return matches[0]
+        wanted = norm(tileset_name)
+        matches = [
+            path
+            for path in root.iterdir()
+            if path.is_dir() and norm(path.name) == wanted
+        ]
         if len(matches) == 1:
             return matches[0]
         raise MapEditorError(
             f"Could not locate the {kind} tileset directory for '{tileset_name}' under {root}."
         )
 
-    def load_tileset(self, tileset_name: str, kind: str):
+    def _tileset_asset_dirs(
+        self, tileset_name: str, directory: Path
+    ) -> tuple[Path, Path]:
+        """Resolves shared tiles.png/palette directories from headers.h."""
+        cache_key = (tileset_name, str(directory))
+        cached = self._tileset_asset_dir_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        tiles_dir = directory
+        palettes_dir = directory / "palettes"
+        headers_h = self.root / "src" / "data" / "tilesets" / "headers.h"
+        graphics_h = self.paths["graphics_h"]
+        if headers_h.is_file() and graphics_h.is_file():
+            header_text = headers_h.read_text(encoding="utf-8", errors="replace")
+            block_match = re.search(
+                r"const\s+struct\s+Tileset\s+"
+                + re.escape(tileset_name)
+                + r"\s*=\s*\{(.*?)\};",
+                header_text,
+                re.DOTALL,
+            )
+            if block_match is not None:
+                block = block_match.group(1)
+                graphics_text = graphics_h.read_text(
+                    encoding="utf-8", errors="replace"
+                )
+                graphics_c = self.root / "src" / "graphics.c"
+                if graphics_c.is_file():
+                    graphics_text += "\n" + graphics_c.read_text(
+                        encoding="utf-8", errors="replace"
+                    )
+
+                def resolve(variable: str | None) -> Path | None:
+                    if not variable:
+                        return None
+                    definition = re.search(
+                        r"\b"
+                        + re.escape(variable)
+                        + r"\b[^;=]*?=\s*(.*?);",
+                        graphics_text,
+                        re.DOTALL,
+                    )
+                    if definition is None:
+                        return None
+                    for relative in re.findall(
+                        r'"([^"]+)"', definition.group(1)
+                    ):
+                        path = self.root / relative
+                        if path.is_file():
+                            return path.parent
+                    return None
+
+                tiles_match = re.search(r"\.tiles\s*=\s*(\w+)", block)
+                palettes_match = re.search(r"\.palettes\s*=\s*(\w+)", block)
+                resolved_tiles = resolve(
+                    tiles_match.group(1) if tiles_match else None
+                )
+                resolved_palettes = resolve(
+                    palettes_match.group(1) if palettes_match else None
+                )
+                if resolved_tiles is not None:
+                    tiles_dir = resolved_tiles
+                if resolved_palettes is not None:
+                    palettes_dir = resolved_palettes
+        self._tileset_asset_dir_cache[cache_key] = (tiles_dir, palettes_dir)
+        return tiles_dir, palettes_dir
+
+    def load_tileset(
+        self, tileset_name: str, kind: str, version: str | None = None
+    ):
         from .tileset import Tileset
 
-        directory = self.tileset_dir(tileset_name, kind)
+        directory = self.tileset_dir(tileset_name, kind, version)
         key = (kind, str(directory))
         cached = self._tileset_cache.get(key)
         if cached is not None:
             return cached
-        tileset = Tileset.load(self, tileset_name, kind, directory)
+        tiles_dir, palettes_dir = self._tileset_asset_dirs(
+            tileset_name, directory
+        )
+        tileset = Tileset.load(
+            self,
+            tileset_name,
+            kind,
+            directory,
+            tiles_directory=tiles_dir,
+            palettes_directory=palettes_dir,
+        )
         self._tileset_cache[key] = tileset
         return tileset
 
@@ -416,8 +509,12 @@ class Project:
             raise MapEditorError(
                 f"Layout '{layout.id}' has no secondary tileset; this tool currently expects a paired secondary tileset."
             )
-        primary = self.load_tileset(layout.primary_tileset, "primary")
-        secondary = self.load_tileset(layout.secondary_tileset, "secondary")
+        primary = self.load_tileset(
+            layout.primary_tileset, "primary", layout.layer_version
+        )
+        secondary = self.load_tileset(
+            layout.secondary_tileset, "secondary", layout.layer_version
+        )
         return TilesetPair(self, primary, secondary)
 
     # Map block data -----------------------------------------------------
@@ -555,7 +652,7 @@ class Project:
         for layout in self.layouts.values():
             try:
                 primary_dir: Path | None = self.tileset_dir(
-                    layout.primary_tileset, "primary"
+                    layout.primary_tileset, "primary", layout.layer_version
                 )
             except MapEditorError:
                 primary_dir = None
@@ -563,7 +660,9 @@ class Project:
             if layout.secondary_tileset:
                 try:
                     secondary_dir = self.tileset_dir(
-                        layout.secondary_tileset, "secondary"
+                        layout.secondary_tileset,
+                        "secondary",
+                        layout.layer_version,
                     )
                 except MapEditorError:
                     secondary_dir = None

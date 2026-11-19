@@ -3159,7 +3159,11 @@ class ImportMap:
         for layout in self.project.layouts.values():
             try:
                 uses_primary = usable_primary and same_directory(
-                    self.project.tileset_dir(layout.primary_tileset, "primary"),
+                    self.project.tileset_dir(
+                        layout.primary_tileset,
+                        "primary",
+                        layout.layer_version,
+                    ),
                     primary_dir,
                 )
             except MapEditorError:
@@ -3169,7 +3173,9 @@ class ImportMap:
                 try:
                     uses_secondary = same_directory(
                         self.project.tileset_dir(
-                            layout.secondary_tileset, "secondary"
+                            layout.secondary_tileset,
+                            "secondary",
+                            layout.layer_version,
                         ),
                         secondary_dir,
                     )

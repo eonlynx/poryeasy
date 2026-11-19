@@ -138,11 +138,16 @@ class Tileset:
         attributes: list[bytes],
         attribute_size: int,
         palettes: list[list[tuple[int, int, int]]],
+        *,
+        tiles_directory: Path | None = None,
+        palettes_directory: Path | None = None,
     ) -> None:
         self.project = project
         self.name = name
         self.kind = kind
         self.directory = directory
+        self.tiles_directory = tiles_directory or directory
+        self.palettes_directory = palettes_directory or (directory / "palettes")
         self.tiles_width, self.tiles_height = tiles_image.size
         self.entries_per_metatile = project.settings.entries_per_metatile
         self.metatiles = metatiles
@@ -197,7 +202,7 @@ class Tileset:
 
     @property
     def tiles_png_path(self) -> Path:
-        return self.directory / "tiles.png"
+        return self.tiles_directory / "tiles.png"
 
     @property
     def metatiles_path(self) -> Path:
@@ -208,7 +213,7 @@ class Tileset:
         return self.directory / "metatile_attributes.bin"
 
     def palette_path(self, local: int) -> Path:
-        return self.directory / "palettes" / f"{local:02d}.pal"
+        return self.palettes_directory / f"{local:02d}.pal"
 
     def uses_global_palette_indices(self) -> bool:
         """Whether this tileset's .pal files are numbered by global palette bank.
@@ -253,8 +258,19 @@ class Tileset:
     # Loading ------------------------------------------------------------
 
     @classmethod
-    def load(cls, project: Project, name: str, kind: str, directory: Path) -> Tileset:
-        tiles_path = directory / "tiles.png"
+    def load(
+        cls,
+        project: Project,
+        name: str,
+        kind: str,
+        directory: Path,
+        *,
+        tiles_directory: Path | None = None,
+        palettes_directory: Path | None = None,
+    ) -> Tileset:
+        tiles_directory = tiles_directory or directory
+        palettes_directory = palettes_directory or (directory / "palettes")
+        tiles_path = tiles_directory / "tiles.png"
         metatiles_path = directory / "metatiles.bin"
         attributes_path = directory / "metatile_attributes.bin"
         for path in (tiles_path, metatiles_path, attributes_path):
@@ -314,9 +330,8 @@ class Tileset:
                     for i in range(0, len(attr_bytes), attribute_size)
                 ]
 
-                palettes_dir = directory / "palettes"
                 palettes = [
-                    load_jasc_palette(palettes_dir / f"{index:02d}.pal")
+                    load_jasc_palette(palettes_directory / f"{index:02d}.pal")
                     for index in range(16)
                 ]
 
@@ -330,6 +345,8 @@ class Tileset:
                     attributes,
                     attribute_size,
                     palettes,
+                    tiles_directory=tiles_directory,
+                    palettes_directory=palettes_directory,
                 )
         except OSError as exc:
             raise MapEditorError(f"Could not read {tiles_path}: {exc}") from exc
