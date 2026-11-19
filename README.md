@@ -669,6 +669,36 @@ content. Slots still used by another map are kept intact so those maps do not
 lose their art. With `--no-reuse-unused-metatiles`, the previous duplicate-fill
 behavior is used, and no pre-import global scan/clearing is performed.
 
+### Merging duplicate metatiles (default)
+
+After every import with changes, Poryeasy checks the target map's primary and
+secondary tilesets for **exact duplicate metatiles**. This runs for both replace
+and add modes. A duplicate means:
+
+- the same 8x8 entries, including palette banks and flips;
+- exactly the same metatile attributes/behaviour.
+
+For each duplicate group, Poryeasy:
+
+1. chooses a canonical ID: a `metatile_labels.h` protected ID first, then a
+   door/animated ID, then the lowest **used** ID;
+2. rewrites every `map.bin` and `border.bin` reference to the duplicate in every
+   layout that uses that tileset — including other maps;
+3. clears the duplicate metatile slot so it becomes empty and available for
+   future imports.
+
+This is enabled by default. Disable it with:
+
+```sh
+... import LittlerootTown --no-dedupe-metatiles
+```
+
+Groups with several protected/critical IDs, or with different attributes, are
+skipped and reported. The import summary shows deduplicated metatiles, rewritten
+cells, affected layouts, and a separate dedupe backup path when files are
+written. Duplicate detection is conservative: it does not merge metatiles that
+only look similar.
+
 An optional second pass can clear 8x8 tile graphics that are no longer
 referenced by any metatile:
 

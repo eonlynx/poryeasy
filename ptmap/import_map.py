@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import struct
 from collections import Counter
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
@@ -36,7 +37,7 @@ from .palette_planner import (
     plan_bank_colors,
 )
 from .palette_sheet import apply_palette_sheet
-from .project import Project, Target
+from .project import LayoutEntry, Project, Target, write_bytes_atomic
 from .tileset import (
     METATILE_SIZE,
     TILE_SIZE,
@@ -168,6 +169,11 @@ class ImportResult:
     ignored_palette_colors: int = 0
     reused_tiles: int = 0
     max_reused_difference: int = 0
+    deduped_metatiles: int = 0
+    dedupe_rewrites: int = 0
+    dedupe_layouts: int = 0
+    dedupe_skipped: int = 0
+    dedupe_backup_dir: Path | None = None
     backup_dir: Path | None = None
     written: list[Path] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
@@ -270,6 +276,7 @@ class ImportMap:
         tiny_edit_pixels: int = 4,
         tiny_edit_policy: str = "warn",
         tile_match_tolerance: int = 1,
+        dedupe_metatiles: bool = True,
     ) -> None:
         self.project = project
         self.target = target
@@ -302,6 +309,7 @@ class ImportMap:
         self.tiny_edit_policy = tiny_edit_policy
         self.tile_match_tolerance = max(0, tile_match_tolerance)
         self.tilesets.tile_match_tolerance = self.tile_match_tolerance
+        self.dedupe_metatiles = dedupe_metatiles
         self._metatiles_cleared = False
         self._sheet_cell_index: dict[bytes, list[int]] = {}
         self._change_allowed_banks: dict[int, range] = {}
@@ -3090,6 +3098,254 @@ class ImportMap:
             tileset.invalidate_caches()
         self.tilesets.invalidate_signature_index()
 
+    def _dedupe_metatiles(self) -> None:
+        """Merges exact duplicate metatiles and rewrites all map/border references."""
+        if not self.dedupe_metatiles:
+            return
+        primary = self.tilesets.primary
+        secondary = self.tilesets.secondary
+        secondary_base = secondary.global_metatile_base
+        mask = self.project.settings.metatile_id_mask
+        critical = self._critical_metatile_ids()
+        counts = self.project.metatile_reference_counts()
+
+        def same_directory(left: Path, right: Path) -> bool:
+            try:
+                return str(left.resolve()).casefold() == str(
+                    right.resolve()
+                ).casefold()
+            except OSError:
+                return str(left).casefold() == str(right).casefold()
+
+        replacements: dict[int, int] = {}
+        clear_slots: list[tuple[Tileset, int]] = []
+        skipped = 0
+        for tileset in (primary, secondary):
+            if not self.project.metatile_usage_complete(tileset):
+                layouts = self.project.metatile_usage_incomplete_layouts(tileset)
+                self.result.warnings.append(
+                    f"Cannot dedupe {tileset.name}: unreadable layout(s): "
+                    f"{', '.join(layouts[:8])}; skipped."
+                )
+                continue
+            groups: dict[tuple[tuple[int, ...], bytes], list[int]] = {}
+            for local, metatile in enumerate(tileset.metatiles):
+                if all(entry.tile_index == 0 for entry in metatile):
+                    continue
+                key = (
+                    tuple(entry.to_word() for entry in metatile),
+                    bytes(tileset.attributes[local]),
+                )
+                groups.setdefault(key, []).append(local)
+            for members in groups.values():
+                if len(members) < 2:
+                    continue
+                ids = sorted(
+                    tileset.global_metatile_base + local for local in members
+                )
+                protected = [
+                    metatile_id
+                    for metatile_id in ids
+                    if self.project.is_protected_metatile_id(
+                        metatile_id, tileset.name
+                    )
+                ]
+                critical_ids = [
+                    metatile_id for metatile_id in ids if metatile_id in critical
+                ]
+                if len(protected) > 1 or len(critical_ids) > 1:
+                    skipped += 1
+                    continue
+                if protected:
+                    canonical = protected[0]
+                elif critical_ids:
+                    canonical = critical_ids[0]
+                else:
+                    used = [
+                        metatile_id
+                        for metatile_id in ids
+                        if counts.get(metatile_id, 0) > 0
+                    ]
+                    canonical = (used or ids)[0]
+                if any(
+                    metatile_id != canonical
+                    for metatile_id in set(protected + critical_ids)
+                ):
+                    skipped += 1
+                    continue
+                for metatile_id in ids:
+                    if metatile_id == canonical:
+                        continue
+                    replacements[metatile_id] = canonical
+                    clear_slots.append(
+                        (tileset, metatile_id - tileset.global_metatile_base)
+                    )
+
+        if not replacements:
+            return
+
+        primary_replacements = {
+            metatile_id: canonical
+            for metatile_id, canonical in replacements.items()
+            if metatile_id < secondary_base
+        }
+        secondary_replacements = {
+            metatile_id: canonical
+            for metatile_id, canonical in replacements.items()
+            if metatile_id >= secondary_base
+        }
+
+        layout_plans: list[
+            tuple[LayoutEntry, list[int], tuple[int, ...], bool, int]
+        ] = []
+        total_rewrites = 0
+        for layout in self.project.layouts.values():
+            try:
+                uses_primary = same_directory(
+                    self.project.tileset_dir(layout.primary_tileset, "primary"),
+                    primary.directory,
+                )
+            except MapEditorError:
+                continue
+            uses_secondary = False
+            if layout.secondary_tileset:
+                try:
+                    uses_secondary = same_directory(
+                        self.project.tileset_dir(
+                            layout.secondary_tileset, "secondary"
+                        ),
+                        secondary.directory,
+                    )
+                except MapEditorError:
+                    uses_secondary = False
+            if not uses_primary and not uses_secondary:
+                continue
+            layout_replacements: dict[int, int] = {}
+            if uses_primary:
+                layout_replacements.update(primary_replacements)
+            if uses_secondary:
+                layout_replacements.update(secondary_replacements)
+            if not layout_replacements:
+                continue
+            try:
+                blocks = self.project.read_blocks(layout)
+                border = self.project.read_border(layout)
+            except MapEditorError as exc:
+                self.result.warnings.append(
+                    f"Cannot dedupe layout {layout.id}: {exc}; no changes applied."
+                )
+                return
+
+            def rewrite(word: int) -> tuple[int, bool]:
+                metatile_id = word & mask
+                canonical = layout_replacements.get(metatile_id)
+                if canonical is None:
+                    return word, False
+                return (word & ~mask) | (canonical & mask), True
+
+            new_blocks: list[int] = []
+            block_rewrites = 0
+            for word in blocks:
+                rewritten, changed = rewrite(word)
+                new_blocks.append(rewritten)
+                block_rewrites += int(changed)
+            new_border: list[int] = []
+            border_rewrites = 0
+            for word in border:
+                rewritten, changed = rewrite(word)
+                new_border.append(rewritten)
+                border_rewrites += int(changed)
+            if not block_rewrites and not border_rewrites:
+                continue
+            layout_plans.append(
+                (
+                    layout,
+                    new_blocks,
+                    tuple(new_border),
+                    bool(border_rewrites),
+                    block_rewrites + border_rewrites,
+                )
+            )
+            total_rewrites += block_rewrites + border_rewrites
+
+        self.result.deduped_metatiles += len(replacements)
+        self.result.dedupe_rewrites += total_rewrites
+        self.result.dedupe_layouts += len(layout_plans)
+        self.result.dedupe_skipped += skipped
+        examples = ", ".join(
+            f"0x{duplicate:03X}->0x{canonical:03X}"
+            for duplicate, canonical in sorted(replacements.items())[:8]
+        )
+        if len(replacements) > 8:
+            examples += f", ... (+{len(replacements) - 8})"
+        if self.dry_run:
+            self.result.warnings.append(
+                f"Dry run: would merge {len(replacements)} duplicate metatile(s) "
+                f"and rewrite {total_rewrites} map/border cell(s) in "
+                f"{len(layout_plans)} layout(s): {examples}."
+            )
+            return
+
+        backup_paths: list[Path] = []
+        for layout, _blocks, _border, _border_changed, _count in layout_plans:
+            backup_paths.append(
+                self.project.layout_path(layout.blockdata_filepath)
+            )
+            if layout.border_filepath:
+                backup_paths.append(
+                    self.project.layout_path(layout.border_filepath)
+                )
+        for tileset, _local in clear_slots:
+            backup_paths.extend([tileset.metatiles_path, tileset.attributes_path])
+        if self.backup:
+            self.result.dedupe_backup_dir = self._create_backup(backup_paths)
+
+        for layout, blocks, border, border_changed, _count in layout_plans:
+            self.project.write_blocks(layout, blocks)
+            self.result.written.append(
+                self.project.layout_path(layout.blockdata_filepath)
+            )
+            if border_changed and layout.border_filepath:
+                path = self.project.layout_path(layout.border_filepath)
+                write_bytes_atomic(
+                    path, struct.pack(f"<{len(border)}H", *border)
+                )
+                self.result.written.append(path)
+            if layout.id == self.layout.id:
+                self.blocks = blocks
+
+        cleared_tilesets = {id(tileset): tileset for tileset, _ in clear_slots}
+        for tileset, local in clear_slots:
+            tileset.metatiles[local] = [
+                TileRef(0, 0, False, False)
+                for _ in range(tileset.entries_per_metatile)
+            ]
+            tileset.attributes[local] = bytes(tileset.attribute_size)
+            tileset.dirty_metadata = True
+        for tileset in cleared_tilesets.values():
+            self.result.written.extend(tileset.save())
+            self.result.touched_tilesets.append((tileset.name, tileset.kind))
+            tileset.invalidate_caches()
+            if (tileset.directory / "porytiles_src").is_dir():
+                self.result.warnings.append(
+                    f"{tileset.name} is Porytiles-managed. Its porytiles_src/ "
+                    "assets are now stale; run 'porytiles decompile-tileset "
+                    f"{tileset.name}' to refresh them."
+                )
+        self.project.invalidate_metatile_usage()
+        self.project._global_tile_usage_cache.clear()
+        self.tilesets.invalidate_signature_index()
+        self.result.warnings.append(
+            f"Merged {len(replacements)} duplicate metatile(s) and rewrote "
+            f"{total_rewrites} map/border cell(s) in {len(layout_plans)} layout(s): "
+            f"{examples}."
+        )
+        if skipped:
+            self.result.warnings.append(
+                f"Skipped {skipped} duplicate group(s) with protected, door or "
+                "conflicting IDs."
+            )
+
     def _handle_removals(
         self,
         groups: list[Group],
@@ -3961,4 +4217,5 @@ class ImportMap:
         self._prepare_replace_plan(groups, remaps)
         self._plan_edited_palettes(changes, groups)
         self.apply(groups, remaps)
+        self._dedupe_metatiles()
         return self.result

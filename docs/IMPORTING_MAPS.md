@@ -66,6 +66,7 @@ Current defaults:
 - `--tile-match-tolerance 1` (tiny edits use the larger tiny-edit threshold)
 - `--reuse-unused-metatiles` (on; disable with `--no-reuse-unused-metatiles`)
 - `--reuse-empty-metatiles-only` (reuse only already-empty slots; keep zero-usage art)
+- `--dedupe-metatiles` (on; disable with `--no-dedupe-metatiles`)
 
 Use `--dry-run` to validate without writing files.
 
@@ -89,6 +90,10 @@ map and tilesets in Porymap after importing.
 - `--reuse-empty-metatiles-only` preserves zero-usage metatiles that still
   contain visible art and only reuses already-empty slots; kept slots are
   reported as `kept unused`.
+- After an import with changes, exact duplicate metatiles in the target primary
+  and secondary tilesets are merged: references in every affected map/border are
+  rewritten to a canonical ID and the duplicate slots are emptied. Disable with
+  `--no-dedupe-metatiles`.
 - If replace mode has fewer new contents than freed slots, the remaining slots
   stay empty instead of being filled with duplicates. Slots still used by other
   maps are kept intact.

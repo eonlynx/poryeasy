@@ -325,6 +325,45 @@ static void TilesetAnim_TestPrimary(u16 timer)
     )
 
 
+def add_duplicate_metatile_and_second_layout(root: Path) -> None:
+    """Adds a duplicate primary metatile and another layout that references it."""
+    primary = root / "data" / "tilesets" / "primary" / "test_primary"
+    words = read_u16(primary / "metatiles.bin")
+    words.extend(words[24:36])
+    (primary / "metatiles.bin").write_bytes(
+        struct.pack(f"<{len(words)}H", *words)
+    )
+    attrs = read_u16(primary / "metatile_attributes.bin")
+    attrs.append(0)
+    (primary / "metatile_attributes.bin").write_bytes(
+        struct.pack(f"<{len(attrs)}H", *attrs)
+    )
+
+    layouts_path = root / "data" / "layouts" / "layouts.json"
+    layouts = json.loads(layouts_path.read_text(encoding="utf-8"))
+    layouts["layouts"].append(
+        {
+            "id": "LAYOUT_TEST2",
+            "name": "Test2_Layout",
+            "width": 4,
+            "height": 4,
+            "primary_tileset": "gTileset_TestPrimary",
+            "secondary_tileset": "gTileset_TestSecondary",
+            "border_filepath": "data/layouts/Test2/border.bin",
+            "blockdata_filepath": "data/layouts/Test2/map.bin",
+            "layout_version": "emerald",
+        }
+    )
+    layouts_path.write_text(json.dumps(layouts), encoding="utf-8")
+
+    layout_dir = root / "data" / "layouts" / "Test2"
+    layout_dir.mkdir(parents=True, exist_ok=True)
+    blocks = [0] * 16
+    blocks[0] = 3
+    (layout_dir / "map.bin").write_bytes(struct.pack("<16H", *blocks))
+    (layout_dir / "border.bin").write_bytes(struct.pack("<4H", 0, 0, 0, 0))
+
+
 def make_synthetic_door_project(root: Path) -> None:
     make_synthetic_triple_project(root)
 
@@ -1127,6 +1166,97 @@ class SyntheticTripleLayerTests(unittest.TestCase):
                 updated_pair.metatile_signature(2), before_signature
             )
 
+    def test_import_dedupes_duplicate_metatiles_across_maps(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ptmap-dedupe-") as temp:
+            project_root = Path(temp) / "project"
+            make_synthetic_triple_project(project_root)
+            add_duplicate_metatile_and_second_layout(project_root)
+            export_dir = Path(temp) / "export"
+            result = run_tool(
+                "export", "TestMap", "--output", str(export_dir), project=project_root
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            bottom = export_dir / "bottom.png"
+            with Image.open(bottom) as opened:
+                image = opened.convert("RGBA")
+            for y in range(48, 64):
+                for x in range(48, 64):
+                    image.putpixel((x, y), (255, 0, 255, 255))
+            image.save(bottom, format="PNG")
+            result = run_tool(
+                "import",
+                "TestMap",
+                "--input",
+                str(export_dir),
+                "--on-new",
+                "add-secondary",
+                "--on-remove",
+                "keep",
+                project=project_root,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            primary = (
+                project_root
+                / "data"
+                / "tilesets"
+                / "primary"
+                / "test_primary"
+                / "metatiles.bin"
+            )
+            words = read_u16(primary)
+            self.assertEqual(words[36:48], [0] * 12)
+            second_blocks = read_u16(
+                project_root / "data" / "layouts" / "Test2" / "map.bin"
+            )
+            self.assertEqual(second_blocks[0] & 0x3FF, 2)
+            self.assertIn("deduped metatiles:", result.stdout)
+
+    def test_no_dedupe_flag_preserves_duplicate_metatiles(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ptmap-dedupe-off-") as temp:
+            project_root = Path(temp) / "project"
+            make_synthetic_triple_project(project_root)
+            add_duplicate_metatile_and_second_layout(project_root)
+            export_dir = Path(temp) / "export"
+            result = run_tool(
+                "export", "TestMap", "--output", str(export_dir), project=project_root
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            bottom = export_dir / "bottom.png"
+            with Image.open(bottom) as opened:
+                image = opened.convert("RGBA")
+            for y in range(48, 64):
+                for x in range(48, 64):
+                    image.putpixel((x, y), (255, 0, 255, 255))
+            image.save(bottom, format="PNG")
+            result = run_tool(
+                "import",
+                "TestMap",
+                "--input",
+                str(export_dir),
+                "--on-new",
+                "add-secondary",
+                "--on-remove",
+                "keep",
+                "--no-dedupe-metatiles",
+                project=project_root,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            primary = (
+                project_root
+                / "data"
+                / "tilesets"
+                / "primary"
+                / "test_primary"
+                / "metatiles.bin"
+            )
+            words = read_u16(primary)
+            self.assertEqual(words[36:48], words[24:36])
+            second_blocks = read_u16(
+                project_root / "data" / "layouts" / "Test2" / "map.bin"
+            )
+            self.assertEqual(second_blocks[0] & 0x3FF, 3)
+            self.assertNotIn("deduped metatiles:", result.stdout)
+
     def test_replace_preserves_tiles_of_reserved_unused_metatiles(self) -> None:
         with tempfile.TemporaryDirectory(prefix="ptmap-replace-reserved-") as temp:
             project_root = Path(temp) / "project"
@@ -1296,6 +1426,7 @@ class SyntheticTripleLayerTests(unittest.TestCase):
                 "--on-remove",
                 "keep",
                 "--no-reuse-unused-metatiles",
+                "--no-dedupe-metatiles",
                 project=project,
             )
             self.assertEqual(result.returncode, 0, result.stderr + result.stdout)

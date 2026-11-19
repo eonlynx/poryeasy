@@ -111,6 +111,7 @@ def cmd_import(args: argparse.Namespace) -> int:
         tiny_edit_pixels=args.tiny_edit_pixels,
         tiny_edit_policy=args.tiny_edit_policy,
         tile_match_tolerance=args.tile_match_tolerance,
+        dedupe_metatiles=args.dedupe_metatiles,
     )
     result = importer.run()
 
@@ -198,6 +199,20 @@ def cmd_import(args: argparse.Namespace) -> int:
         )
     if result.left_empty_replace_slots:
         print(f"  empty freed slots:    {result.left_empty_replace_slots}")
+    if (
+        result.deduped_metatiles
+        or result.dedupe_rewrites
+        or result.dedupe_skipped
+    ):
+        print(
+            f"  deduped metatiles:    {result.deduped_metatiles} "
+            f"in {result.dedupe_layouts} layout(s)"
+        )
+        print(f"  dedupe rewrites:      {result.dedupe_rewrites} cell(s)")
+        if result.dedupe_skipped:
+            print(f"  dedupe skipped:       {result.dedupe_skipped} group(s)")
+    if result.dedupe_backup_dir is not None:
+        print(f"  dedupe backup:        {result.dedupe_backup_dir}")
     if result.removed_metatiles:
         print(f"  cleared metatiles:    {result.removed_metatiles}")
     if result.cleared_tiles:
@@ -533,6 +548,16 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Reuse only already-empty metatile slots; keep unused metatiles that "
             "still contain art intact"
+        ),
+    )
+    import_parser.add_argument(
+        "--no-dedupe-metatiles",
+        dest="dedupe_metatiles",
+        action="store_false",
+        help=(
+            "Do not merge duplicate metatiles in the imported map's primary and "
+            "secondary tilesets (default: merge exact duplicates, rewrite map/border "
+            "references, and empty the duplicate slots)"
         ),
     )
     import_parser.add_argument(
