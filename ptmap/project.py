@@ -151,7 +151,11 @@ class Project:
             )
 
         self._defined = self._read_defines()
-        self.settings = self._build_settings().with_layer_mode(layer_mode)
+        self._default_settings = self._build_settings().with_layer_mode(layer_mode)
+        self._frlg_settings = self._build_settings(frlg=True).with_layer_mode(
+            layer_mode
+        )
+        self.settings = self._default_settings
         self.layouts = self._load_layouts()
         self._maps: list[MapEntry] | None = None
         self._tileset_cache: dict[tuple[str, str], object] = {}
@@ -208,7 +212,9 @@ class Project:
             seen.add(path)
             text = path.read_text(encoding="utf-8", errors="replace")
             for name, value in re.findall(
-                r"^\s*#define\s+([A-Za-z_]\w*)\s+([^/\r\n]+)", text, re.MULTILINE
+                r"^[ \t]*#define[ \t]+([A-Za-z_]\w*)[ \t]+([^/\r\n]+)",
+                text,
+                re.MULTILINE,
             ):
                 value = value.strip()
                 if value not in _DEFAULT_SETTINGS and not re.fullmatch(
@@ -221,8 +227,19 @@ class Project:
                     pass
         return defines
 
-    def _build_settings(self) -> ProjectSettings:
+    def _build_settings(self, *, frlg: bool = False) -> ProjectSettings:
         values = {**_DEFAULT_SETTINGS, **self._defined}
+        if frlg:
+            values["NUM_TILES_IN_PRIMARY"] = values.get(
+                "NUM_TILES_IN_PRIMARY_FRLG", values["NUM_TILES_IN_PRIMARY"]
+            )
+            values["NUM_METATILES_IN_PRIMARY"] = values.get(
+                "NUM_METATILES_IN_PRIMARY_FRLG",
+                values["NUM_METATILES_IN_PRIMARY"],
+            )
+            values["NUM_PALS_IN_PRIMARY"] = values.get(
+                "NUM_PALS_IN_PRIMARY_FRLG", values["NUM_PALS_IN_PRIMARY"]
+            )
         return ProjectSettings(
             num_tiles_in_primary=values["NUM_TILES_IN_PRIMARY"],
             num_tiles_total=values["NUM_TILES_TOTAL"],
@@ -235,6 +252,28 @@ class Project:
             collision_mask=values["MAPGRID_COLLISION_MASK"],
             elevation_mask=values["MAPGRID_ELEVATION_MASK"],
         )
+
+    def use_layout_settings(self, layout: LayoutEntry) -> None:
+        """Selects Emerald or FRLG primary/secondary limits for a layout."""
+        target = (
+            self._frlg_settings
+            if layout.layer_version.casefold() == "frlg"
+            else self._default_settings
+        )
+        if self.settings is target:
+            return
+        self.settings = target
+        self._tileset_cache.clear()
+        self._tileset_asset_dir_cache.clear()
+        self._global_tile_usage_cache.clear()
+        self._metatile_usage_cache = None
+        self._metatile_ref_counts_cache = None
+        self._metatile_usage_incomplete = set()
+        self._metatile_usage_incomplete_layouts = {}
+        self._animation_info_cache = None
+        self._animation_catalog_cache = None
+        self._tile_reference_counts_cache.clear()
+        self._graphics_h_tile_limit_cache.clear()
 
     # Layouts and maps ---------------------------------------------------
 

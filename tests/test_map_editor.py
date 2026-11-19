@@ -21,6 +21,7 @@ import sys
 import tempfile
 import unittest
 from collections import Counter
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -1255,6 +1256,31 @@ class SyntheticTripleLayerTests(unittest.TestCase):
             )
             self.assertEqual(second_blocks[0] & 0x3FF, 2)
             self.assertIn("deduped metatiles:", result.stdout)
+
+    def test_frlg_layout_settings_use_frlg_limits(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ptmap-frlg-settings-") as temp:
+            project_root = Path(temp) / "project"
+            make_synthetic_triple_project(project_root)
+            fieldmap = project_root / "include" / "fieldmap.h"
+            fieldmap.write_text(
+                fieldmap.read_text(encoding="ascii")
+                + "\n#define GUARD_TEST\n"
+                "#define NUM_TILES_IN_PRIMARY_FRLG 640\n"
+                "#define NUM_METATILES_IN_PRIMARY_FRLG 640\n"
+                "#define NUM_PALS_IN_PRIMARY_FRLG 7\n",
+                encoding="ascii",
+            )
+            project = Project(project_root)
+            emerald = project.layouts["LAYOUT_TEST"]
+            frlg = replace(emerald, layer_version="frlg")
+            project.use_layout_settings(frlg)
+            self.assertEqual(project.settings.num_tiles_in_primary, 640)
+            self.assertEqual(project.settings.num_metatiles_in_primary, 640)
+            self.assertEqual(project.settings.num_pals_in_primary, 7)
+            project.use_layout_settings(emerald)
+            self.assertEqual(project.settings.num_tiles_in_primary, 512)
+            self.assertEqual(project.settings.num_metatiles_in_primary, 512)
+            self.assertEqual(project.settings.num_pals_in_primary, 6)
 
     def test_dedupe_keeps_secondary_when_all_maps_share_secondary(self) -> None:
         with tempfile.TemporaryDirectory(prefix="ptmap-dedupe-secondary-") as temp:

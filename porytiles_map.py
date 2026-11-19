@@ -57,6 +57,7 @@ def make_project(args: argparse.Namespace) -> Project:
 def cmd_export(args: argparse.Namespace) -> int:
     project = make_project(args)
     target = project.resolve(args.map)
+    project.use_layout_settings(target.layout)
     output = Path(args.output).resolve() if args.output else None
     paths = export_map(project, target, output, overwrite=args.overwrite)
     layout = target.layout

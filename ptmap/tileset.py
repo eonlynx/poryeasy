@@ -232,6 +232,7 @@ class Tileset:
             if hasattr(self.project, "graphics_h_text")
             else None
         )
+        matched = False
         if text is not None:
             palette_var = self.name.replace("gTileset_", "gTilesetPalettes_", 1)
             match = re.search(
@@ -241,11 +242,25 @@ class Tileset:
                 re.DOTALL,
             )
             if match is not None:
+                matched = True
                 count = len(re.findall(r"INC(?:GFX|BIN)_U16", match.group(1)))
                 self._uses_global_palette_indices = count > (
                     self.project.settings.num_pals_total
                     - self.project.settings.num_pals_in_primary
                 )
+        if not matched:
+            # Shared tilesets (for example FRLG SilphCo using Condominiums
+            # palettes) do not have a gTilesetPalettes_<name> symbol. A full
+            # sixteen-file palette directory means global bank numbering.
+            count = sum(
+                1
+                for path in self.palettes_directory.glob("[0-9][0-9].pal")
+                if path.is_file()
+            )
+            self._uses_global_palette_indices = count > (
+                self.project.settings.num_pals_total
+                - self.project.settings.num_pals_in_primary
+            )
         return self._uses_global_palette_indices
 
     def palette_file_index(self, bank: int) -> int:
