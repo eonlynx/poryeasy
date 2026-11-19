@@ -325,6 +325,51 @@ static void TilesetAnim_TestPrimary(u16 timer)
     )
 
 
+def add_cross_tileset_duplicate(root: Path, *, different_secondary: bool) -> None:
+    """Adds an identical metatile to the secondary and a second layout."""
+    primary = root / "data" / "tilesets" / "primary" / "test_primary"
+    primary_words = read_u16(primary / "metatiles.bin")
+    duplicate = primary_words[24:36]
+    secondary = root / "data" / "tilesets" / "secondary" / "test_secondary"
+    (secondary / "metatiles.bin").write_bytes(
+        struct.pack("<12H", *duplicate)
+    )
+    (secondary / "metatile_attributes.bin").write_bytes(
+        struct.pack("<1H", 0)
+    )
+    if different_secondary:
+        other = root / "data" / "tilesets" / "secondary" / "test_secondary2"
+        shutil.copytree(secondary, other)
+        secondary_name = "gTileset_TestSecondary2"
+        block = 2
+    else:
+        secondary_name = "gTileset_TestSecondary"
+        block = 512
+
+    layouts_path = root / "data" / "layouts" / "layouts.json"
+    layouts = json.loads(layouts_path.read_text(encoding="utf-8"))
+    layouts["layouts"].append(
+        {
+            "id": "LAYOUT_TEST2",
+            "name": "Test2_Layout",
+            "width": 4,
+            "height": 4,
+            "primary_tileset": "gTileset_TestPrimary",
+            "secondary_tileset": secondary_name,
+            "border_filepath": "data/layouts/Test2/border.bin",
+            "blockdata_filepath": "data/layouts/Test2/map.bin",
+            "layout_version": "emerald",
+        }
+    )
+    layouts_path.write_text(json.dumps(layouts), encoding="utf-8")
+    layout_dir = root / "data" / "layouts" / "Test2"
+    layout_dir.mkdir(parents=True, exist_ok=True)
+    blocks = [0] * 16
+    blocks[0] = block
+    (layout_dir / "map.bin").write_bytes(struct.pack("<16H", *blocks))
+    (layout_dir / "border.bin").write_bytes(struct.pack("<4H", 0, 0, 0, 0))
+
+
 def add_duplicate_metatile_and_second_layout(root: Path) -> None:
     """Adds a duplicate primary metatile and another layout that references it."""
     primary = root / "data" / "tilesets" / "primary" / "test_primary"
@@ -1210,6 +1255,116 @@ class SyntheticTripleLayerTests(unittest.TestCase):
             )
             self.assertEqual(second_blocks[0] & 0x3FF, 2)
             self.assertIn("deduped metatiles:", result.stdout)
+
+    def test_dedupe_keeps_secondary_when_all_maps_share_secondary(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ptmap-dedupe-secondary-") as temp:
+            project_root = Path(temp) / "project"
+            make_synthetic_triple_project(project_root)
+            add_cross_tileset_duplicate(
+                project_root, different_secondary=False
+            )
+            export_dir = Path(temp) / "export"
+            result = run_tool(
+                "export", "TestMap", "--output", str(export_dir), project=project_root
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            bottom = export_dir / "bottom.png"
+            with Image.open(bottom) as opened:
+                image = opened.convert("RGBA")
+            for y in range(48, 64):
+                for x in range(48, 64):
+                    image.putpixel((x, y), (255, 0, 255, 255))
+            image.save(bottom, format="PNG")
+            result = run_tool(
+                "import",
+                "TestMap",
+                "--input",
+                str(export_dir),
+                "--on-new",
+                "add-secondary",
+                "--on-remove",
+                "keep",
+                project=project_root,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            self.assertIn("deduped metatiles:", result.stdout)
+            primary = read_u16(
+                project_root
+                / "data"
+                / "tilesets"
+                / "primary"
+                / "test_primary"
+                / "metatiles.bin"
+            )
+            self.assertEqual(primary[24:36], [0] * 12)
+            blocks = read_u16(project_root / "data/layouts/Test/map.bin")
+            self.assertEqual(blocks[0 * 4 + 1] & 0x3FF, 512)
+            second_blocks = read_u16(
+                project_root / "data/layouts/Test2/map.bin"
+            )
+            self.assertEqual(second_blocks[0] & 0x3FF, 512)
+
+    def test_dedupe_keeps_primary_when_secondaries_differ(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ptmap-dedupe-primary-") as temp:
+            project_root = Path(temp) / "project"
+            make_synthetic_triple_project(project_root)
+            add_cross_tileset_duplicate(
+                project_root, different_secondary=True
+            )
+            export_dir = Path(temp) / "export"
+            result = run_tool(
+                "export", "TestMap", "--output", str(export_dir), project=project_root
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            bottom = export_dir / "bottom.png"
+            with Image.open(bottom) as opened:
+                image = opened.convert("RGBA")
+            for y in range(48, 64):
+                for x in range(48, 64):
+                    image.putpixel((x, y), (255, 0, 255, 255))
+            image.save(bottom, format="PNG")
+            result = run_tool(
+                "import",
+                "TestMap",
+                "--input",
+                str(export_dir),
+                "--on-new",
+                "add-secondary",
+                "--on-remove",
+                "keep",
+                project=project_root,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            self.assertIn("deduped metatiles:", result.stdout)
+            primary = read_u16(
+                project_root
+                / "data"
+                / "tilesets"
+                / "primary"
+                / "test_primary"
+                / "metatiles.bin"
+            )
+            self.assertEqual(primary[24:36], [1 | (1 << 12)] * 4 + [0] * 8)
+            secondary = read_u16(
+                project_root
+                / "data"
+                / "tilesets"
+                / "secondary"
+                / "test_secondary"
+                / "metatiles.bin"
+            )
+            self.assertNotEqual(
+                secondary[0:12], [1 | (1 << 12)] * 4 + [0] * 8
+            )
+            blocks = read_u16(project_root / "data/layouts/Test/map.bin")
+            self.assertEqual(blocks[0 * 4 + 1] & 0x3FF, 2)
+            # The freed duplicate slot is available before the import, so the
+            # new secondary metatile reuses it.
+            self.assertEqual(blocks[3 * 4 + 3] & 0x3FF, 512)
+            second_blocks = read_u16(
+                project_root / "data/layouts/Test2/map.bin"
+            )
+            self.assertEqual(second_blocks[0] & 0x3FF, 2)
 
     def test_no_dedupe_flag_preserves_duplicate_metatiles(self) -> None:
         with tempfile.TemporaryDirectory(prefix="ptmap-dedupe-off-") as temp:

@@ -671,9 +671,10 @@ behavior is used, and no pre-import global scan/clearing is performed.
 
 ### Merging duplicate metatiles (default)
 
-After every import with changes, Poryeasy checks the target map's primary and
+Before applying an import, Poryeasy checks the target map's primary and
 secondary tilesets for **exact duplicate metatiles**. This runs for both replace
-and add modes. A duplicate means:
+and add modes, so the freed slots are already available when new metatiles are
+assigned. A duplicate means:
 
 - the same 8x8 entries, including palette banks and flips;
 - exactly the same metatile attributes/behaviour.
@@ -684,8 +685,20 @@ For each duplicate group, Poryeasy:
    door/animated ID, then the lowest **used** ID;
 2. rewrites every `map.bin` and `border.bin` reference to the duplicate in every
    layout that uses that tileset — including other maps;
-3. clears the duplicate metatile slot so it becomes empty and available for
-   future imports.
+3. clears the duplicate metatile slot so it becomes empty and can be reused by
+   the current import.
+
+When the same metatile exists in both the target primary and secondary tilesets,
+Poryeasy checks every map that references either copy:
+
+- if all those maps use the target secondary tileset, the secondary copy is kept,
+  the primary copy is cleared, and references are rewritten to the secondary ID;
+- if any map uses a different secondary tileset, the primary copy is kept, the
+  secondary copy is cleared, and references are rewritten to the primary ID.
+
+If a canonical ID would not be valid in every map that references the group (for
+example a primary ID used with a different primary tileset), the group is skipped
+instead of risking broken map blocks.
 
 This is enabled by default. Disable it with:
 

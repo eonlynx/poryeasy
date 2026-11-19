@@ -90,10 +90,12 @@ map and tilesets in Porymap after importing.
 - `--reuse-empty-metatiles-only` preserves zero-usage metatiles that still
   contain visible art and only reuses already-empty slots; kept slots are
   reported as `kept unused`.
-- After an import with changes, exact duplicate metatiles in the target primary
-  and secondary tilesets are merged: references in every affected map/border are
-  rewritten to a canonical ID and the duplicate slots are emptied. Disable with
-  `--no-dedupe-metatiles`.
+- Before an import, exact duplicate metatiles in the target primary and secondary
+  tilesets are merged: references in every affected map/border are rewritten to a
+  canonical ID and the duplicate slots are emptied, so the current import can
+  reuse them. If the same metatile exists in both tilesets, all usages are
+  checked: a shared target secondary keeps the secondary copy; differing
+  secondaries keep the primary copy. Disable with `--no-dedupe-metatiles`.
 - If replace mode has fewer new contents than freed slots, the remaining slots
   stay empty instead of being filled with duplicates. Slots still used by other
   maps are kept intact.

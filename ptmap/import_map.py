@@ -3104,10 +3104,10 @@ class ImportMap:
             return
         primary = self.tilesets.primary
         secondary = self.tilesets.secondary
+        primary_dir = primary.directory
+        secondary_dir = secondary.directory
         secondary_base = secondary.global_metatile_base
         mask = self.project.settings.metatile_id_mask
-        critical = self._critical_metatile_ids()
-        counts = self.project.metatile_reference_counts()
 
         def same_directory(left: Path, right: Path) -> bool:
             try:
@@ -3117,9 +3117,7 @@ class ImportMap:
             except OSError:
                 return str(left).casefold() == str(right).casefold()
 
-        replacements: dict[int, int] = {}
-        clear_slots: list[tuple[Tileset, int]] = []
-        skipped = 0
+        usable_tilesets: list[Tileset] = []
         for tileset in (primary, secondary):
             if not self.project.metatile_usage_complete(tileset):
                 layouts = self.project.metatile_usage_incomplete_layouts(tileset)
@@ -3128,7 +3126,19 @@ class ImportMap:
                     f"{', '.join(layouts[:8])}; skipped."
                 )
                 continue
-            groups: dict[tuple[tuple[int, ...], bytes], list[int]] = {}
+            usable_tilesets.append(tileset)
+        if not usable_tilesets:
+            return
+        usable_primary = any(tileset is primary for tileset in usable_tilesets)
+        usable_secondary = any(
+            tileset is secondary for tileset in usable_tilesets
+        )
+
+        groups: dict[
+            tuple[tuple[int, ...], bytes], list[tuple[Tileset, int, int]]
+        ] = {}
+        candidate_ids: set[int] = set()
+        for tileset in usable_tilesets:
             for local, metatile in enumerate(tileset.metatiles):
                 if all(entry.tile_index == 0 for entry in metatile):
                     continue
@@ -3136,30 +3146,134 @@ class ImportMap:
                     tuple(entry.to_word() for entry in metatile),
                     bytes(tileset.attributes[local]),
                 )
-                groups.setdefault(key, []).append(local)
-            for members in groups.values():
-                if len(members) < 2:
-                    continue
-                ids = sorted(
-                    tileset.global_metatile_base + local for local in members
+                metatile_id = tileset.global_metatile_base + local
+                groups.setdefault(key, []).append(
+                    (tileset, local, metatile_id)
                 )
-                protected = [
-                    metatile_id
-                    for metatile_id in ids
-                    if self.project.is_protected_metatile_id(
-                        metatile_id, tileset.name
+                candidate_ids.add(metatile_id)
+
+        layout_infos: dict[
+            str, tuple[LayoutEntry, list[int], tuple[int, ...], bool, bool]
+        ] = {}
+        references: dict[int, set[str]] = {}
+        for layout in self.project.layouts.values():
+            try:
+                uses_primary = usable_primary and same_directory(
+                    self.project.tileset_dir(layout.primary_tileset, "primary"),
+                    primary_dir,
+                )
+            except MapEditorError:
+                uses_primary = False
+            uses_secondary = False
+            if usable_secondary and layout.secondary_tileset:
+                try:
+                    uses_secondary = same_directory(
+                        self.project.tileset_dir(
+                            layout.secondary_tileset, "secondary"
+                        ),
+                        secondary_dir,
                     )
-                ]
-                critical_ids = [
-                    metatile_id for metatile_id in ids if metatile_id in critical
-                ]
-                if len(protected) > 1 or len(critical_ids) > 1:
-                    skipped += 1
+                except MapEditorError:
+                    uses_secondary = False
+            if not uses_primary and not uses_secondary:
+                continue
+            try:
+                blocks = self.project.read_blocks(layout)
+                border = self.project.read_border(layout)
+            except MapEditorError as exc:
+                self.result.warnings.append(
+                    f"Cannot dedupe layout {layout.id}: {exc}; no changes applied."
+                )
+                return
+            layout_infos[layout.id] = (
+                layout,
+                blocks,
+                border,
+                uses_primary,
+                uses_secondary,
+            )
+            for word in blocks:
+                metatile_id = word & mask
+                if metatile_id not in candidate_ids:
                     continue
-                if protected:
-                    canonical = protected[0]
-                elif critical_ids:
-                    canonical = critical_ids[0]
+                if metatile_id < secondary_base and not uses_primary:
+                    continue
+                if metatile_id >= secondary_base and not uses_secondary:
+                    continue
+                references.setdefault(metatile_id, set()).add(layout.id)
+            for word in border:
+                metatile_id = word & mask
+                if metatile_id not in candidate_ids:
+                    continue
+                if metatile_id < secondary_base and not uses_primary:
+                    continue
+                if metatile_id >= secondary_base and not uses_secondary:
+                    continue
+                references.setdefault(metatile_id, set()).add(layout.id)
+
+        critical = self._critical_metatile_ids()
+        counts = self.project.metatile_reference_counts()
+        replacements: dict[int, int] = {}
+        clear_slots: list[tuple[Tileset, int]] = []
+        skipped = 0
+        for members in groups.values():
+            if len(members) < 2:
+                continue
+            by_id = {
+                metatile_id: (tileset, local)
+                for tileset, local, metatile_id in members
+            }
+            ids = sorted(by_id)
+            protected = [
+                metatile_id
+                for metatile_id in ids
+                if self.project.is_protected_metatile_id(
+                    metatile_id, by_id[metatile_id][0].name
+                )
+            ]
+            critical_ids = [
+                metatile_id for metatile_id in ids if metatile_id in critical
+            ]
+            if len(protected) > 1 or len(critical_ids) > 1:
+                skipped += 1
+                continue
+
+            if protected:
+                canonical = protected[0]
+            elif critical_ids:
+                canonical = critical_ids[0]
+            else:
+                has_primary = any(
+                    metatile_id < secondary_base for metatile_id in ids
+                )
+                has_secondary = any(
+                    metatile_id >= secondary_base for metatile_id in ids
+                )
+                if has_primary and has_secondary:
+                    refs: set[str] = set()
+                    for metatile_id in ids:
+                        refs.update(references.get(metatile_id, ()))
+                    same_secondary = bool(refs) and all(
+                        layout_infos[layout_id][4] for layout_id in refs
+                    )
+                    if same_secondary:
+                        candidates = [
+                            metatile_id
+                            for metatile_id in ids
+                            if metatile_id >= secondary_base
+                        ]
+                    else:
+                        candidates = [
+                            metatile_id
+                            for metatile_id in ids
+                            if metatile_id < secondary_base
+                        ]
+                    used = [
+                        metatile_id
+                        for metatile_id in candidates
+                        if counts.get(metatile_id, 0) > 0
+                    ]
+                    canonical = (used or candidates)[0]
                 else:
                     used = [
                         metatile_id
@@ -3167,21 +3281,57 @@ class ImportMap:
                         if counts.get(metatile_id, 0) > 0
                     ]
                     canonical = (used or ids)[0]
-                if any(
-                    metatile_id != canonical
-                    for metatile_id in set(protected + critical_ids)
-                ):
-                    skipped += 1
+
+            if any(
+                metatile_id != canonical
+                for metatile_id in set(protected + critical_ids)
+            ):
+                skipped += 1
+                continue
+
+            invalid_reference = False
+            for metatile_id in ids:
+                for layout_id in references.get(metatile_id, ()):
+                    (
+                        _layout,
+                        _blocks,
+                        _border,
+                        uses_primary,
+                        uses_secondary,
+                    ) = layout_infos[layout_id]
+                    if canonical < secondary_base:
+                        if not uses_primary:
+                            invalid_reference = True
+                            break
+                    elif not uses_secondary:
+                        invalid_reference = True
+                        break
+                if invalid_reference:
+                    break
+            if invalid_reference:
+                skipped += 1
+                self.result.warnings.append(
+                    "Skipped duplicate group "
+                    f"{', '.join(f'0x{metatile_id:03X}' for metatile_id in ids)}: "
+                    f"canonical 0x{canonical:03X} is not valid in every map "
+                    "that references it."
+                )
+                continue
+
+            for metatile_id in ids:
+                if metatile_id == canonical:
                     continue
-                for metatile_id in ids:
-                    if metatile_id == canonical:
-                        continue
-                    replacements[metatile_id] = canonical
-                    clear_slots.append(
-                        (tileset, metatile_id - tileset.global_metatile_base)
-                    )
+                tileset, local = by_id[metatile_id]
+                replacements[metatile_id] = canonical
+                clear_slots.append((tileset, local))
 
         if not replacements:
+            self.result.dedupe_skipped += skipped
+            if skipped:
+                self.result.warnings.append(
+                    f"Skipped {skipped} duplicate group(s) with protected, "
+                    "door or conflicting IDs."
+                )
             return
 
         primary_replacements = {
@@ -3199,27 +3349,13 @@ class ImportMap:
             tuple[LayoutEntry, list[int], tuple[int, ...], bool, int]
         ] = []
         total_rewrites = 0
-        for layout in self.project.layouts.values():
-            try:
-                uses_primary = same_directory(
-                    self.project.tileset_dir(layout.primary_tileset, "primary"),
-                    primary.directory,
-                )
-            except MapEditorError:
-                continue
-            uses_secondary = False
-            if layout.secondary_tileset:
-                try:
-                    uses_secondary = same_directory(
-                        self.project.tileset_dir(
-                            layout.secondary_tileset, "secondary"
-                        ),
-                        secondary.directory,
-                    )
-                except MapEditorError:
-                    uses_secondary = False
-            if not uses_primary and not uses_secondary:
-                continue
+        for (
+            layout,
+            blocks,
+            border,
+            uses_primary,
+            uses_secondary,
+        ) in layout_infos.values():
             layout_replacements: dict[int, int] = {}
             if uses_primary:
                 layout_replacements.update(primary_replacements)
@@ -3227,34 +3363,27 @@ class ImportMap:
                 layout_replacements.update(secondary_replacements)
             if not layout_replacements:
                 continue
-            try:
-                blocks = self.project.read_blocks(layout)
-                border = self.project.read_border(layout)
-            except MapEditorError as exc:
-                self.result.warnings.append(
-                    f"Cannot dedupe layout {layout.id}: {exc}; no changes applied."
-                )
-                return
-
-            def rewrite(word: int) -> tuple[int, bool]:
-                metatile_id = word & mask
-                canonical = layout_replacements.get(metatile_id)
-                if canonical is None:
-                    return word, False
-                return (word & ~mask) | (canonical & mask), True
 
             new_blocks: list[int] = []
             block_rewrites = 0
             for word in blocks:
-                rewritten, changed = rewrite(word)
-                new_blocks.append(rewritten)
-                block_rewrites += int(changed)
+                metatile_id = word & mask
+                canonical = layout_replacements.get(metatile_id)
+                if canonical is None:
+                    new_blocks.append(word)
+                else:
+                    new_blocks.append((word & ~mask) | (canonical & mask))
+                    block_rewrites += 1
             new_border: list[int] = []
             border_rewrites = 0
             for word in border:
-                rewritten, changed = rewrite(word)
-                new_border.append(rewritten)
-                border_rewrites += int(changed)
+                metatile_id = word & mask
+                canonical = layout_replacements.get(metatile_id)
+                if canonical is None:
+                    new_border.append(word)
+                else:
+                    new_border.append((word & ~mask) | (canonical & mask))
+                    border_rewrites += 1
             if not block_rewrites and not border_rewrites:
                 continue
             layout_plans.append(
@@ -3280,9 +3409,9 @@ class ImportMap:
             examples += f", ... (+{len(replacements) - 8})"
         if self.dry_run:
             self.result.warnings.append(
-                f"Dry run: would merge {len(replacements)} duplicate metatile(s) "
-                f"and rewrite {total_rewrites} map/border cell(s) in "
-                f"{len(layout_plans)} layout(s): {examples}."
+                f"Dry run: would merge {len(replacements)} duplicate "
+                f"metatile(s) and rewrite {total_rewrites} map/border cell(s) "
+                f"in {len(layout_plans)} layout(s): {examples}."
             )
             return
 
@@ -3337,13 +3466,13 @@ class ImportMap:
         self.tilesets.invalidate_signature_index()
         self.result.warnings.append(
             f"Merged {len(replacements)} duplicate metatile(s) and rewrote "
-            f"{total_rewrites} map/border cell(s) in {len(layout_plans)} layout(s): "
-            f"{examples}."
+            f"{total_rewrites} map/border cell(s) in {len(layout_plans)} "
+            f"layout(s): {examples}."
         )
         if skipped:
             self.result.warnings.append(
-                f"Skipped {skipped} duplicate group(s) with protected, door or "
-                "conflicting IDs."
+                f"Skipped {skipped} duplicate group(s) with protected, door "
+                "or conflicting IDs."
             )
 
     def _handle_removals(
@@ -4128,6 +4257,7 @@ class ImportMap:
                     f"but '{self.target.query}' resolves to {self.layout.id}."
                 )
 
+        self._dedupe_metatiles()
         self._reuse_unused_metatiles()
         palette_result = apply_palette_sheet(
             self.project,
@@ -4217,5 +4347,4 @@ class ImportMap:
         self._prepare_replace_plan(groups, remaps)
         self._plan_edited_palettes(changes, groups)
         self.apply(groups, remaps)
-        self._dedupe_metatiles()
         return self.result

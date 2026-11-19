@@ -121,6 +121,8 @@ def cmd_import(args: argparse.Namespace) -> int:
         and not result.palette_changed
         and not result.cleared_unused_primary
         and not result.cleared_unused_secondary
+        and not result.deduped_metatiles
+        and not result.dedupe_rewrites
     ):
         print(f"No changes detected in {input_dir}.")
         for warning in result.warnings:
@@ -556,8 +558,8 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_false",
         help=(
             "Do not merge duplicate metatiles in the imported map's primary and "
-            "secondary tilesets (default: merge exact duplicates, rewrite map/border "
-            "references, and empty the duplicate slots)"
+            "secondary tilesets before importing (default: merge exact duplicates, "
+            "rewrite map/border references, and empty the duplicate slots)"
         ),
     )
     import_parser.add_argument(
