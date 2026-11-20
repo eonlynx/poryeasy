@@ -379,9 +379,16 @@ def rebuild_preserve(project) -> None:
         dest_tiles[k][idx] = pattern
         return idx
 
-    # Fountain patterns in order.
+    # Fountain patterns in order.  The animation callbacks write the top
+    # frames to slots 0..3 and the bottom frames to slots 4..7, so the top
+    # metatile (lower y) must be assigned first.  Iterating a set here used
+    # to swap the fountain halves while keeping the static render identical.
+    fountain_order = sorted(
+        fountain_keys,
+        key=lambda ck: min((y, x) for _side, x, y in new_info[ck]["coords"]),
+    )
     fountain_pattern_order = []
-    for ckey in fountain_keys:
+    for ckey in fountain_order:
         src_side, src_mid = new_info[ckey]["source"]
         for word in metatile_entry(current[src_side].meta, src_mid):
             tile = word & 0x3FF

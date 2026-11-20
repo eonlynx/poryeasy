@@ -298,6 +298,8 @@ after the split is committed. It writes a timestamped backup under
 * secondary palette banks used by those entries contain the same colours;
 * every map block keeps the same rendered appearance (the pass only reorders
   tile slots and palette banks, it does not change art);
+* the West South fountain keeps its top/bottom animation order (top frames in
+  slots `0..3`, bottom frames in `4..7`);
 * all four visible seams report zero mismatches.
 
 If any of these checks fails, the command stops without writing files.
