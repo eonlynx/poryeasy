@@ -26,10 +26,13 @@ from pathlib import Path
 # Make ``ptmap`` importable when this file is run directly.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from ptmap.border import DEFAULT_BAND, discover_variants, share_border
 from ptmap.errors import MapEditorError
 from ptmap.export import default_export_directory, export_map
 from ptmap.import_map import ImportMap
+from ptmap.preserve import rebuild_preserve
 from ptmap.project import Project
+from ptmap.split import split_map
 
 
 def find_project_root(start: Path) -> Path | None:
@@ -243,12 +246,122 @@ def cmd_import(args: argparse.Namespace) -> int:
                 )
                 if completed.returncode != 0:
                     print(f"  warning: porytiles decompile-tileset failed for {name}.")
+    if not args.dry_run and not args.no_share_border:
+        border_result = _auto_share_border(
+            project,
+            target,
+            backup=not args.no_backup,
+        )
+        if border_result is not None:
+            if border_result.changed:
+                _print_border_summary(border_result)
+            else:
+                print()
+                print("Shared border: already in sync.")
     if args.dry_run:
         print("  dry run:              no files were written")
     else:
         print(f"  files written:        {len(dict.fromkeys(result.written))}")
         print()
         print("Reload the tileset/map in Porymap to see the changes.")
+    return 0
+
+
+def _print_border_summary(result) -> None:
+    print()
+    print("Shared border")
+    print(f"  variants:             {', '.join(result.variants)}")
+    print(f"  border band:          {result.band_used} tile(s)")
+    print(f"  border metatiles:     {result.canonical_metatiles}")
+    print(f"  shared ids:           {result.new_ids}")
+    print(f"  band blocks remapped: {result.band_blocks}")
+    if result.skipped_animated:
+        print(f"  animated skipped:     {result.skipped_animated}")
+    for name in result.variants:
+        print(
+            f"  {name}: {result.tiles_added.get(name, 0)} tile(s), "
+            f"{result.palettes_added.get(name, 0)} palette(s)"
+        )
+    if result.backup_dir is not None:
+        print(f"  backup:               {result.backup_dir}")
+
+
+def _auto_share_border(
+    project: Project,
+    target,
+    *,
+    band: int = DEFAULT_BAND,
+    backup: bool = True,
+):
+    try:
+        variants = discover_variants(project, target)
+    except MapEditorError:
+        return None
+    return share_border(project, variants, band=band, backup=backup)
+
+
+def cmd_preserve_rebuild(args: argparse.Namespace) -> int:
+    root = (
+        Path(args.project_root).resolve()
+        if args.project_root
+        else find_project_root(Path.cwd())
+    )
+    if root is None:
+        raise MapEditorError(
+            "Could not find a decomp project above the current directory. "
+            "Run from the project root or pass --project-root."
+        )
+    project = Project(root, layer_mode=args.layer_mode)
+    rebuild_preserve(project)
+    return 0
+
+
+def cmd_split(args: argparse.Namespace) -> int:
+    project = make_project(args)
+    target = project.resolve(args.map)
+    result = split_map(
+        project,
+        target,
+        row=args.row,
+        band=args.border_band,
+        adjacent=not args.no_adjacent,
+        dry_run=args.dry_run,
+        backup=not args.no_backup,
+    )
+    print("Split plan" if args.dry_run else "Split complete")
+    print(f"  south map:            {result.map_ids[0]}")
+    print(f"  north map:            {result.map_ids[1] if len(result.map_ids) > 1 else '<none>'}")
+    print(f"  split row:            {result.row}")
+    if result.adjacent:
+        print(f"  adjacent split:       {', '.join(result.adjacent)}")
+    for item in result.variants.items():
+        print(f"  tilesets:             {item[1][0]} / {item[1][1]}")
+    for warning in result.warnings:
+        print(f"  warning:              {warning}")
+    if result.backup_dir is not None:
+        print(f"  backup:               {result.backup_dir}")
+    if args.dry_run:
+        print("  dry run:              no files were written")
+    return 0
+
+
+def cmd_share_border(args: argparse.Namespace) -> int:
+    project = make_project(args)
+    target = project.resolve(args.map)
+    variants = discover_variants(project, target)
+    result = share_border(
+        project,
+        variants,
+        band=args.border_band,
+        dry_run=args.dry_run,
+        backup=not args.no_backup,
+    )
+    if not result.changed:
+        print("No border changes needed.")
+        return 0
+    _print_border_summary(result)
+    if args.dry_run:
+        print("  dry run:              no files were written")
     return 0
 
 
@@ -600,7 +713,87 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_false",
         help="Never prompt; --on-new must not be 'ask'",
     )
+    import_parser.add_argument(
+        "--no-share-border",
+        action="store_true",
+        help=(
+            "Do not automatically share border metatiles with the other half "
+            "of a split map after importing"
+        ),
+    )
     import_parser.set_defaults(func=cmd_import)
+
+    preserve_parser = sub.add_parser(
+        "preserve-rebuild",
+        help=(
+            "Rebuild the four Battle Frontier outside tilesets from the original "
+            "East/West bases, preserving original IDs and placing new content in "
+            "free slots in map order"
+        ),
+    )
+    preserve_parser.add_argument(
+        "--project-root", help="Decomp project root (default: search upwards)"
+    )
+    preserve_parser.add_argument(
+        "--layer-mode",
+        choices=("dual", "triple"),
+        help="Override NUM_TILES_PER_METATILE from the project headers",
+    )
+    preserve_parser.set_defaults(func=cmd_preserve_rebuild)
+
+    split_parser = sub.add_parser(
+        "split",
+        help="Split a map into south/north halves with shared border metatiles",
+    )
+    add_common(split_parser)
+    split_parser.add_argument(
+        "--row",
+        type=int,
+        help="Row where the south half starts (default: half the map height)",
+    )
+    split_parser.add_argument(
+        "--border-band",
+        type=int,
+        default=DEFAULT_BAND,
+        metavar="N",
+        help=f"Rows/columns treated as the shared border band (default: {DEFAULT_BAND})",
+    )
+    split_parser.add_argument(
+        "--no-adjacent",
+        action="store_true",
+        help="Do not split left/right connected maps at the same row",
+    )
+    split_parser.add_argument(
+        "--no-backup", action="store_true", help="Skip file backups"
+    )
+    split_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Validate and report the plan without writing files",
+    )
+    split_parser.set_defaults(func=cmd_split)
+
+    border_parser = sub.add_parser(
+        "share-border",
+        help="Give split-map border metatiles the same IDs in every half",
+    )
+    add_common(border_parser)
+    border_parser.add_argument(
+        "--border-band",
+        type=int,
+        default=DEFAULT_BAND,
+        metavar="N",
+        help=f"Rows/columns treated as the shared border band (default: {DEFAULT_BAND})",
+    )
+    border_parser.add_argument(
+        "--no-backup", action="store_true", help="Skip file backups"
+    )
+    border_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Validate and report without writing files",
+    )
+    border_parser.set_defaults(func=cmd_share_border)
 
     info_parser = sub.add_parser(
         "info", help="Show resolved layout/tileset information"

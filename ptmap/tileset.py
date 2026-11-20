@@ -691,17 +691,50 @@ class Tileset:
         return self.global_tile_base + local
 
     def append_tile_range(self, patterns: list[bytes]) -> int:
-        start = len(self.patterns)
-        if start + len(patterns) > self.max_local_tiles:
+        count = len(patterns)
+        if count == 0:
+            return self.global_tile_base
+        used = (
+            self.project.tile_usage_for(self)
+            | self._protected_tile_indices()
+            | self._reserved_tiles
+        )
+        start: int | None = None
+        # Prefer appending at the end when there is room.
+        tail = len(self.patterns)
+        if tail + count <= self.max_local_tiles and all(
+            self.global_tile_base + tail + offset not in used
+            for offset in range(count)
+        ):
+            start = tail
+        # A full tileset can still have long runs of unused, unreserved
+        # slots in the middle. Reuse the first contiguous run large enough
+        # instead of failing just because the tile array is at its limit.
+        if start is None:
+            run_start: int | None = None
+            for local in range(1, len(self.patterns)):
+                global_index = self.global_tile_base + local
+                if global_index in used:
+                    run_start = None
+                    continue
+                if run_start is None:
+                    run_start = local
+                if local - run_start + 1 == count:
+                    start = run_start
+                    break
+        if start is None:
             raise MapEditorError(
-                f"No contiguous tile slots remain in {self.name} for {len(patterns)} "
+                f"No contiguous tile slots remain in {self.name} for {count} "
                 "new animation tiles."
             )
-        self.patterns.extend(patterns)
+        if start == len(self.patterns):
+            self.patterns.extend(patterns)
+        else:
+            self.patterns[start:start + count] = patterns
         self._reserved_tiles.update(
             range(
                 self.global_tile_base + start,
-                self.global_tile_base + start + len(patterns),
+                self.global_tile_base + start + count,
             )
         )
         self._tile_matcher = None

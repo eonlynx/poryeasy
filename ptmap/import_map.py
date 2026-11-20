@@ -2785,20 +2785,28 @@ class ImportMap:
                                     "8x8 tile(s)."
                                 )
                                 continue
-                            if analysis.exact and not (
-                                self.result.palette_changed
-                                or self.tilesets.palette_rewrites
+                            if (
+                                analysis.exact
+                                and self.quantize != "nearest"
+                                and self.palette_mode != "nearest"
+                                and not (
+                                    self.result.palette_changed
+                                    or self.tilesets.palette_rewrites
+                                )
                             ):
                                 raise MapEditorError(
                                     f"Internal validation failed at {edited.label}, layer "
                                     f"{LAYER_NAMES[layer]} ({diff} pixels differ). Nothing was written."
                                 )
-                            reason = (
-                                "palette colours were rewritten"
-                                if self.result.palette_changed
+                            if (
+                                self.result.palette_changed
                                 or self.tilesets.palette_rewrites
-                                else "palette quantisation"
-                            )
+                            ):
+                                reason = "palette colours were rewritten"
+                            elif self.quantize == "nearest" or self.palette_mode == "nearest":
+                                reason = "nearest palette quantisation"
+                            else:
+                                reason = "palette quantisation"
                             self.result.warnings.append(
                                 f"{edited.label} {LAYER_NAMES[layer]} differs by {diff} pixel(s) "
                                 f"because {reason}."

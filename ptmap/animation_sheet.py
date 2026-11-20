@@ -1361,7 +1361,7 @@ def _add_new_animation_to_source(
                     f"void {init_name}(void)\n"
                     "{\n"
                     f"    s{kind_name}TilesetAnimCounter = 0;\n"
-                    f"    s{kind_name}TilesetAnimCounterMax = {divisor};\n"
+                    f"    s{kind_name}TilesetAnimCounterMax = 256;\n"
                     f"    s{kind_name}TilesetAnimCallback = {anim_name};\n"
                     "}\n\n"
                 )
