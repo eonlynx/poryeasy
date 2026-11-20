@@ -57,6 +57,7 @@ PAIR_SPECS = (
     ("ES", "EN", "ns"),
 )
 CANON_PRIORITY = {"WS": 0, "EN": 1, "ES": 2, "WN": 3}
+EXACT_BORDER_LAYOUTS = frozenset(spec[1] for spec in SIDES.values())
 # src/fieldmap.c: west connections copy MAP_OFFSET (7) columns, east
 # connections copy MAP_OFFSET + 1 (8) columns, north/south copy 7 rows.
 EW_WEST_COLS = 7

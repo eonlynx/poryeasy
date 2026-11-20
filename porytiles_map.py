@@ -28,7 +28,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from ptmap.border import DEFAULT_BAND, discover_variants, share_border
 from ptmap.errors import MapEditorError
-from ptmap.exact_border import sync_exact_borders
+from ptmap.exact_border import EXACT_BORDER_LAYOUTS, sync_exact_borders
 from ptmap.export import default_export_directory, export_map
 from ptmap.import_map import ImportMap
 from ptmap.preserve import rebuild_preserve
@@ -259,6 +259,13 @@ def cmd_import(args: argparse.Namespace) -> int:
             else:
                 print()
                 print("Shared border: already in sync.")
+    if (
+        not args.dry_run
+        and not args.no_exact_border
+        and target.layout.id in EXACT_BORDER_LAYOUTS
+    ):
+        exact_result = sync_exact_borders(project, backup=not args.no_backup)
+        _print_exact_border_summary(exact_result)
     if args.dry_run:
         print("  dry run:              no files were written")
     else:
@@ -770,6 +777,14 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Do not automatically share border metatiles with the other half "
             "of a split map after importing"
+        ),
+    )
+    import_parser.add_argument(
+        "--no-exact-border",
+        action="store_true",
+        help=(
+            "Do not run the exact byte-level border sync after importing a "
+            "Battle Frontier outside map"
         ),
     )
     import_parser.set_defaults(func=cmd_import)
