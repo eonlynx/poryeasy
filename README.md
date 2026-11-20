@@ -229,6 +229,79 @@ contents. The most frequently painted new contents take the freed slots first;
 this keeps the dominant materials (ground, trees, water) together even when the
 map layout changes completely.
 
+## Battle Frontier outside split workflow
+
+The Battle Frontier outside area is split into four layouts because the GBA
+secondary tileset limit (512 tiles/metatiles per half) cannot hold the whole
+area at once:
+
+```text
+West South   gTileset_BattleFrontierOutsideWestSouth
+East South   gTileset_BattleFrontierOutsideEastSouth
+West North   gTileset_BattleFrontierOutsideWestNorth
+East North   gTileset_BattleFrontierOutsideEastNorth
+```
+
+The original full tilesets remain the source of truth:
+
+```text
+data/tilesets/secondary/battle_frontier_outside_west
+data/tilesets/secondary/battle_frontier_outside_east
+```
+
+### Why IDs alone are not enough
+
+When the player crosses a map connection, the engine renders the neighbouring
+map's metatile IDs with the **current** map's secondary tileset. Two metatiles
+with the same ID can still look wrong if their 16-byte entries point at
+different 8x8 tile slots or different palette banks. The border therefore
+requires all of the following to match in both tilesets:
+
+* the metatile ID,
+* the 16-byte metatile entry (both layers),
+* the secondary tile indices used by those words,
+* the palette bank bits and the palette contents in that bank.
+
+`exact-border` enforces all four. It checks the bands the engine actually
+copies: 7 columns into a west connection, 8 columns into an east connection,
+and 7 rows into a north/south connection.
+
+### Commands
+
+```sh
+# Rebuild the four split tilesets from the original East/West bases.
+# Original IDs/positions are preserved and new content is placed in free
+# slots in map order. exact-border runs automatically at the end.
+python <poryeasy>/porytiles_map.py preserve-rebuild --project-root <project>
+
+# Run only the exact border pass. It is idempotent; on an already-correct
+# project it reports 0 changed entries, 0 moved tiles and 0 mismatches.
+python <poryeasy>/porytiles_map.py exact-border --project-root <project>
+
+# Validate without writing
+python <poryeasy>/porytiles_map.py exact-border --project-root <project> --dry-run
+```
+
+`import` also runs `exact-border` automatically when the imported map is one of
+the four Battle Frontier outside layouts. Use `--no-exact-border` to skip it
+(for example while debugging an import).
+
+`preserve-rebuild` reads the original pre-split map block data from git history
+when `HEAD` already contains the split layouts, so it remains reproducible
+after the split is committed. It writes a timestamped backup under
+`.poryeasy-backups/` before changing tilesets.
+
+### Guarantees checked by the tool
+
+* visible seam entries are byte-identical on both sides;
+* tile patterns referenced by those entries exist at the same indices;
+* secondary palette banks used by those entries contain the same colours;
+* every map block keeps the same rendered appearance (the pass only reorders
+  tile slots and palette banks, it does not change art);
+* all four visible seams report zero mismatches.
+
+If any of these checks fails, the command stops without writing files.
+
 ## Canvas size and expanding maps
 
 Poryeasy accepts layer images whose size differs from the layout and updates the
