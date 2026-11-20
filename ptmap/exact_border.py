@@ -58,10 +58,12 @@ PAIR_SPECS = (
 )
 CANON_PRIORITY = {"WS": 0, "EN": 1, "ES": 2, "WN": 3}
 EXACT_BORDER_LAYOUTS = frozenset(spec[1] for spec in SIDES.values())
-# src/fieldmap.c: west connections copy MAP_OFFSET (7) columns, east
-# connections copy MAP_OFFSET + 1 (8) columns, north/south copy 7 rows.
-EW_WEST_COLS = 7
-EW_EAST_COLS = 8
+# src/fieldmap.c copies 7 columns west and 8 columns east, but the southern
+# new building needs one extra metatile of shared border on each side to cover
+# its outermost column during the West South -> East South transition.  The
+# northern halves do not use that building, so they keep the engine widths.
+EW_WEST_COLS = {"WS": 8, "WN": 7}
+EW_EAST_COLS = {"ES": 9, "EN": 8}
 NS_ROWS = 8
 # Animated secondary tile slots.  The fountain callback writes absolute tiles
 # 512..519, i.e. secondary tile indices 0..7 of West South; the flag callback
@@ -111,9 +113,9 @@ def _band_ids(side: str, kind: str, blocks: dict[str, list[int]]) -> set[int]:
     ids: set[int] = set()
     if kind == "ew":
         xs = (
-            range(width - EW_WEST_COLS, width)
+            range(width - EW_WEST_COLS[side], width)
             if side in ("WS", "WN")
-            else range(EW_EAST_COLS)
+            else range(EW_EAST_COLS[side])
         )
         for y in range(36):
             for x in xs:
@@ -430,12 +432,12 @@ def sync_exact_borders(
             ids_a = {
                 blocks[a][y * width_a + x] & 0x3FF
                 for y in range(36)
-                for x in range(width_a - EW_WEST_COLS, width_a)
+                for x in range(width_a - EW_WEST_COLS[a], width_a)
             }
             ids_b = {
                 blocks[b][y * width_b + x] & 0x3FF
                 for y in range(36)
-                for x in range(EW_EAST_COLS)
+                for x in range(EW_EAST_COLS[b])
             }
         else:
             ids_a = {

@@ -264,7 +264,10 @@ requires all of the following to match in both tilesets:
 
 `exact-border` enforces all four. It checks the bands the engine actually
 copies: 7 columns into a west connection, 8 columns into an east connection,
-and 7 rows into a north/south connection.
+and 7 rows into a north/south connection. The southern West/East seam uses one
+extra metatile on each side (8 columns west, 9 columns east) so the outermost
+column of the new building is shared too; the northern seam keeps the engine
+widths.
 
 ### Commands
 
