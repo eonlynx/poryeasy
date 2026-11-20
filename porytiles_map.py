@@ -28,6 +28,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from ptmap.border import DEFAULT_BAND, discover_variants, share_border
 from ptmap.errors import MapEditorError
+from ptmap.exact_border import sync_exact_borders
 from ptmap.export import default_export_directory, export_map
 from ptmap.import_map import ImportMap
 from ptmap.preserve import rebuild_preserve
@@ -300,6 +301,53 @@ def _auto_share_border(
     return share_border(project, variants, band=band, backup=backup)
 
 
+def _print_exact_border_summary(result) -> None:
+    print()
+    print("Exact border")
+    print(f"  shared ids:           {result.shared_ids}")
+    for name, count in result.paired.items():
+        print(f"  {name}: {count} id(s)")
+    print(f"  entries changed:      {result.entries_changed}")
+    print(f"  tile patterns moved:  {result.tiles_added}")
+    print(f"  palette copies:       {result.palette_copies}")
+    if result.palette_rebanks:
+        print(f"  palette rebanks:      {result.palette_rebanks}")
+    if result.skipped:
+        print(f"  skipped ids:          {len(result.skipped)}")
+        for mid, a, b, side in result.skipped[:10]:
+            print(
+                f"    0x{mid:03X} ({a}/{b}): {side} uses it outside the seam"
+            )
+    print(f"  map appearance delta: {result.map_changes}")
+    for name, count in result.visible_mismatches.items():
+        print(f"  visible {name}: {count} mismatch(es)")
+    if result.backup_dir is not None:
+        print(f"  backup:               {result.backup_dir}")
+
+
+def cmd_exact_border(args: argparse.Namespace) -> int:
+    root = (
+        Path(args.project_root).resolve()
+        if args.project_root
+        else find_project_root(Path.cwd())
+    )
+    if root is None:
+        raise MapEditorError(
+            "Could not find a decomp project above the current directory. "
+            "Run from the project root or pass --project-root."
+        )
+    project = Project(root, layer_mode=args.layer_mode)
+    result = sync_exact_borders(
+        project,
+        dry_run=args.dry_run,
+        backup=not args.no_backup,
+    )
+    _print_exact_border_summary(result)
+    if args.dry_run:
+        print("  dry run:              no files were written")
+    return 0
+
+
 def cmd_preserve_rebuild(args: argparse.Namespace) -> int:
     root = (
         Path(args.project_root).resolve()
@@ -313,6 +361,9 @@ def cmd_preserve_rebuild(args: argparse.Namespace) -> int:
         )
     project = Project(root, layer_mode=args.layer_mode)
     rebuild_preserve(project)
+    if not args.no_exact_border:
+        result = sync_exact_borders(project, backup=True)
+        _print_exact_border_summary(result)
     return 0
 
 
@@ -739,7 +790,40 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("dual", "triple"),
         help="Override NUM_TILES_PER_METATILE from the project headers",
     )
+    preserve_parser.add_argument(
+        "--no-exact-border",
+        action="store_true",
+        help=(
+            "Do not run the exact byte-level border sync after rebuilding the "
+            "four Battle Frontier outside tilesets"
+        ),
+    )
     preserve_parser.set_defaults(func=cmd_preserve_rebuild)
+
+    exact_parser = sub.add_parser(
+        "exact-border",
+        help=(
+            "Make the four Battle Frontier outside border seams byte-identical "
+            "(same ids, tile positions and palette banks)"
+        ),
+    )
+    exact_parser.add_argument(
+        "--project-root", help="Decomp project root (default: search upwards)"
+    )
+    exact_parser.add_argument(
+        "--layer-mode",
+        choices=("dual", "triple"),
+        help="Override NUM_TILES_PER_METATILE from the project headers",
+    )
+    exact_parser.add_argument(
+        "--no-backup", action="store_true", help="Skip file backups"
+    )
+    exact_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Validate and report without writing files",
+    )
+    exact_parser.set_defaults(func=cmd_exact_border)
 
     split_parser = sub.add_parser(
         "split",

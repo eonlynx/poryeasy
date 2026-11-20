@@ -22,6 +22,7 @@ import numpy as np
 from PIL import Image
 
 from .border import TilesetData, metatile_entry, metatile_attr, _render
+from .errors import MapEditorError
 
 ROOT: Path | None = None
 SEC: Path | None = None
@@ -60,13 +61,72 @@ def key_of(d: TilesetData, mid: int):
     return (_render(metatile_entry(d.meta, mid), d.tiles, d.palettes, PRIMARY), metatile_attr(d.attrs, mid))
 
 
-def orig_blocks(name: str):
-    data = subprocess.run(
-        ["git", "-C", str(ROOT), "show", f"HEAD:data/layouts/{name}/map.bin"],
+def _git_blob(commit: str, path: str) -> bytes | None:
+    completed = subprocess.run(
+        ["git", "-C", str(ROOT), "show", f"{commit}:{path}"],
         capture_output=True,
-        check=True,
-    ).stdout
-    return list(struct.unpack(f"<{len(data)//2}H", data))
+        check=False,
+    )
+    return completed.stdout if completed.returncode == 0 else None
+
+
+def orig_blocks(name: str, expected_words: int):
+    """Return the pre-split map block data.
+
+    Before the split is committed, HEAD still contains the full map.  After
+    the split commit, reconstruct the source from the parent of the commit
+    that added the ``_North`` layout (or, failing that, the most recent
+    historical blob with the expected size).
+    """
+    path = f"data/layouts/{name}/map.bin"
+    candidates: list[str] = ["HEAD"]
+    north_path = f"data/layouts/{name}_North/map.bin"
+    added = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(ROOT),
+            "log",
+            "--diff-filter=A",
+            "--format=%H",
+            "-1",
+            "--",
+            north_path,
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    ).stdout.strip()
+    if added:
+        parent = subprocess.run(
+            ["git", "-C", str(ROOT), "rev-parse", f"{added}^"],
+            capture_output=True,
+            text=True,
+            check=False,
+        ).stdout.strip()
+        if parent:
+            candidates.append(parent)
+    history = subprocess.run(
+        ["git", "-C", str(ROOT), "log", "--format=%H", "--", path],
+        capture_output=True,
+        text=True,
+        check=False,
+    ).stdout.split()
+    candidates.extend(history)
+
+    seen: set[str] = set()
+    for commit in candidates:
+        if commit in seen:
+            continue
+        seen.add(commit)
+        data = _git_blob(commit, path)
+        if data is not None and len(data) == expected_words * 2:
+            return list(struct.unpack(f"<{expected_words}H", data))
+    raise MapEditorError(
+        f"Could not find the original {name}/map.bin in git history "
+        f"({expected_words} blocks expected). Commit the pre-split map or "
+        "run preserve-rebuild before splitting."
+    )
 
 
 def rebuild_preserve(project) -> None:
@@ -89,8 +149,14 @@ def rebuild_preserve(project) -> None:
         for k, s in SIDES.items()
     }
     orig_maps = {
-        "west": orig_blocks("BattleFrontier_OutsideWest"),
-        "east": orig_blocks("BattleFrontier_OutsideEast"),
+        "west": orig_blocks(
+            "BattleFrontier_OutsideWest",
+            SIDES["WS"].orig_width * SIDES["WS"].height * 2,
+        ),
+        "east": orig_blocks(
+            "BattleFrontier_OutsideEast",
+            SIDES["ES"].orig_width * SIDES["ES"].height * 2,
+        ),
     }
 
     # Original block IDs and used IDs per half.
